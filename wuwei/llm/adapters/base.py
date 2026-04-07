@@ -1,7 +1,7 @@
 from abc import ABC,abstractmethod
 from typing import Any
 
-from llm.types import Message, LLMResponse,LLMResponseChunk
+from ..types import Message, LLMResponse,LLMResponseChunk
 
 
 class BaseAdapter(ABC):
@@ -22,5 +22,5 @@ class BaseAdapter(ABC):
         pass
 
     @abstractmethod
-    def parse_stream_chunk(self,chunk:Any)->LLMResponseChunk:
+    def parse_stream_chunk(self,chunk:Any)->dict[str, Any] | None:
         pass
