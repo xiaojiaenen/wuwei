@@ -1,0 +1,26 @@
+from abc import ABC,abstractmethod
+from typing import Any
+
+from llm.types import Message, LLMResponse,LLMResponseChunk
+
+
+class Adapter(ABC):
+    @abstractmethod
+    def build_request(self,
+                      messages:list[Message],
+                      tools:list[dict]|None=None,
+                      stream:bool|None=False,
+                        **kwargs)-> Any:
+        pass
+
+    @abstractmethod
+    def call(self)-> Any:
+        pass
+
+    @abstractmethod
+    def parse_response(self,row_response:Any)->LLMResponse:
+        pass
+
+    @abstractmethod
+    def parse_stream_chunk(self,raw_response:Any)->LLMResponseChunk:
+        pass
