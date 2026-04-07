@@ -3,9 +3,9 @@ import json
 import time
 from typing import Any, AsyncIterator, Union
 
-from llm.adapters import OpenAIAdapter
-from llm.adapters.base import BaseAdapter
-from llm.types import Message, LLMResponse, LLMResponseChunk, FunctionCall, ToolCall
+from .adapters import OpenAIAdapter
+from .adapters.base import BaseAdapter
+from .types import Message, LLMResponse, LLMResponseChunk, FunctionCall, ToolCall
 
 
 class LLMGateway:
@@ -14,13 +14,16 @@ class LLMGateway:
         provider = config.get("provider", "openai")
         self.adapter: BaseAdapter
         if provider == "openai":
-            self.adapter = OpenAIAdapter(
-                api_key=config["api_key"],
-                base_url=config["base_url"],
-                model=config.get("model", "gpt-5.4"),
-                temperature=config.get("temperature", 0.2),
-                max_tokens=config.get("max_tokens", 4096),
-            )
+            adapter_kwargs = {
+                "api_key": config["api_key"],
+                "model": config.get("model", "gpt-5.4"),
+                "temperature": config.get("temperature", 0.2),
+                "max_tokens": config.get("max_tokens", 4096),
+            }
+            if config.get("base_url"):
+                adapter_kwargs["base_url"] = config["base_url"]
+
+            self.adapter = OpenAIAdapter(**adapter_kwargs)
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
