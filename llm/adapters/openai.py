@@ -3,11 +3,11 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from base import Adapter
-from llm.types import LLMResponseChunk, LLMResponse, Message, ToolCall, FunctionCall
+from .base import BaseAdapter
+from ..types import LLMResponseChunk, LLMResponse, Message, ToolCall, FunctionCall
 
 
-class OpenAIAdapter(Adapter):
+class OpenAIAdapter(BaseAdapter):
     def __init__(self,api_key:str,model:str|None="gpt-5.4",base_url:str|None="https://api.openai.com/v1",**kwargs):
         self.client=AsyncOpenAI(api_key=api_key,base_url=base_url)
         self.model = model
@@ -96,13 +96,14 @@ class OpenAIAdapter(Adapter):
             "finish_reason": chunk.choices[0].finish_reason,
         }
         if delta.tool_calls:
-            result["tool_calls_delta"] = [
-                {
-                    "index": tc.index,
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
-                }
-                for tc in delta.tool_calls
-            ]
+            result["tool_calls_delta"] = []
+            for tc in delta.tool_calls:
+                item = {"index": tc.index}
+                if tc.id:
+                    item["id"] = tc.id
+                if tc.function.name:
+                    item["name"] = tc.function.name
+                if tc.function.arguments:
+                    item["arguments"] = tc.function.arguments
+                result["tool_calls_delta"].append(item)
         return result

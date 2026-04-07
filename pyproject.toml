@@ -1,10 +1,13 @@
 [project]
 name = "wuwei"
 version = "0.1.0"
-description = "Add your description here"
+description = "Wuwei - 无为而治的 AI 智能体框架"
+authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
+license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "openai>=2.30.0",
     "pydantic>=2.12.5",
+    "pytest>=9.0.2",
 ]

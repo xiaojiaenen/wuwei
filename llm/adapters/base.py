@@ -4,7 +4,7 @@ from typing import Any
 from llm.types import Message, LLMResponse,LLMResponseChunk
 
 
-class Adapter(ABC):
+class BaseAdapter(ABC):
     @abstractmethod
     def build_request(self,
                       messages:list[Message],
