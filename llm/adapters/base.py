@@ -14,13 +14,13 @@ class Adapter(ABC):
         pass
 
     @abstractmethod
-    def call(self)-> Any:
+    def call(self,request:Any)-> Any:
         pass
 
     @abstractmethod
-    def parse_response(self,row_response:Any)->LLMResponse:
+    def parse_response(self,raw_response:Any)->LLMResponse:
         pass
 
     @abstractmethod
-    def parse_stream_chunk(self,raw_response:Any)->LLMResponseChunk:
+    def parse_stream_chunk(self,chunk:Any)->LLMResponseChunk:
         pass
