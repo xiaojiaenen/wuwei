@@ -1,13 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "wuwei"
-version = "0.1.0"
+version = "0.1.0-alpha1"
 description = "Wuwei - 无为而治的 AI 智能体框架"
 authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"                         # 改为简单字符串（SPDX 表达式）
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"                     # 放宽到 3.10（openai 支持）
 dependencies = [
-    "openai>=2.30.0",
-    "pydantic>=2.12.5",
-    "pytest>=9.0.2",
+    "openai>=1.0.0",                           # 最新稳定版是 1.x，2.x 不存在
+    "pydantic>=2.0.0",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "black>=23.0",
+    "ruff>=0.0.280",
+]
+
+[project.urls]
+Homepage = "https://github.com/xiaojiaenen/wuwei"
+Repository = "https://github.com/xiaojiaenen/wuwei"
+Documentation = "https://github.com/xiaojiaenen/wuwei"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wuwei*"]       # 只打包 wuwei 及其子包
+exclude = ["tests*", "examples*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
