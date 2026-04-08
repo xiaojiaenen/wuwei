@@ -63,49 +63,48 @@ pip install -e ".[dev]"
 ```python
 import asyncio
 
-from wuwei.core.agent import Agent
-from wuwei.core.base import AgentConfig
+from wuwei.agent.agent import Agent
+from wuwei.agent.base import AgentConfig
 from wuwei.llm import LLMGateway
 from wuwei.tools import ToolRegistry
-
 
 registry = ToolRegistry()
 
 
 @registry.tool(description="获取指定城市的天气")
 async def get_weather(city: str) -> str:
-    weather_data = {
-        "北京": "晴，25C",
-        "上海": "多云，23C",
-        "广州": "阵雨，28C",
-    }
-    return weather_data.get(city, f"暂未找到 {city} 的天气信息")
+  weather_data = {
+    "北京": "晴，25C",
+    "上海": "多云，23C",
+    "广州": "阵雨，28C",
+  }
+  return weather_data.get(city, f"暂未找到 {city} 的天气信息")
 
 
 async def main():
-    llm = LLMGateway(
-        {
-            "provider": "openai",
-            "api_key": "YOUR_API_KEY",
-            "model": "gpt-5.4",
-            # 如果你使用兼容 OpenAI 协议的平台，可以加上 base_url
-            # "base_url": "https://your-provider.example/v1",
-            "temperature": 0.2,
-        }
-    )
+  llm = LLMGateway(
+    {
+      "provider": "openai",
+      "api_key": "YOUR_API_KEY",
+      "model": "gpt-5.4",
+      # 如果你使用兼容 OpenAI 协议的平台，可以加上 base_url
+      # "base_url": "https://your-provider.example/v1",
+      "temperature": 0.2,
+    }
+  )
 
-    agent = Agent(
-        llm=llm,
-        tools=registry,
-        config=AgentConfig(
-            name="demo-agent",
-            system_prompt="你是一个会调用工具的中文助手。",
-            max_steps=5,
-        ),
-    )
+  agent = Agent(
+    llm=llm,
+    tools=registry,
+    config=AgentConfig(
+      name="demo-agent",
+      system_prompt="你是一个会调用工具的中文助手。",
+      max_steps=5,
+    ),
+  )
 
-    result = await agent.run("帮我查一下上海天气")
-    print(result)
+  result = await agent.run("帮我查一下上海天气")
+  print(result)
 
 
 asyncio.run(main())
@@ -256,51 +255,50 @@ LLM 返回普通文本 或 tool_calls
 ```python
 import asyncio
 
-from wuwei.core.agent import Agent
-from wuwei.core.base import AgentConfig
+from wuwei.agent.agent import Agent
+from wuwei.agent.base import AgentConfig
 from wuwei.llm import LLMGateway
 from wuwei.tools import ToolRegistry
-
 
 registry = ToolRegistry()
 
 
 @registry.tool(description="执行简单数学运算")
 async def calculate(a: float, b: float, operation: str) -> str:
-    if operation == "add":
-        return str(a + b)
-    if operation == "subtract":
-        return str(a - b)
-    if operation == "multiply":
-        return str(a * b)
-    if operation == "divide":
-        if b == 0:
-            return "除数不能为 0"
-        return str(a / b)
-    return f"不支持的 operation: {operation}"
+  if operation == "add":
+    return str(a + b)
+  if operation == "subtract":
+    return str(a - b)
+  if operation == "multiply":
+    return str(a * b)
+  if operation == "divide":
+    if b == 0:
+      return "除数不能为 0"
+    return str(a / b)
+  return f"不支持的 operation: {operation}"
 
 
 async def main():
-    llm = LLMGateway(
-        {
-            "provider": "openai",
-            "api_key": "YOUR_API_KEY",
-            "model": "gpt-5.4",
-            "temperature": 0.2,
-        }
-    )
+  llm = LLMGateway(
+    {
+      "provider": "openai",
+      "api_key": "YOUR_API_KEY",
+      "model": "gpt-5.4",
+      "temperature": 0.2,
+    }
+  )
 
-    agent = Agent(
-        llm=llm,
-        tools=registry,
-        config=AgentConfig(
-            system_prompt="你可以在需要时调用工具完成计算。",
-            max_steps=5,
-        ),
-    )
+  agent = Agent(
+    llm=llm,
+    tools=registry,
+    config=AgentConfig(
+      system_prompt="你可以在需要时调用工具完成计算。",
+      max_steps=5,
+    ),
+  )
 
-    result = await agent.run("请帮我计算 20 除以 4")
-    print(result)
+  result = await agent.run("请帮我计算 20 除以 4")
+  print(result)
 
 
 asyncio.run(main())

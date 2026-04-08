@@ -1,6 +1,6 @@
 from typing import Any, AsyncIterator
 
-from wuwei.core.base import BaseAgent, AgentConfig
+from wuwei.agent.base import BaseAgent, AgentConfig
 from wuwei.core.context import Context
 from wuwei.llm import LLMGateway, LLMResponse, LLMResponseChunk
 from wuwei.tools import ToolRegistry, Tool
