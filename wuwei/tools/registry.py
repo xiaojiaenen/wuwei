@@ -23,10 +23,10 @@ class ToolRegistry:
     def get(self,name:str)->Tool|None:
         return self._tools[name]
 
-    def list(self)->list[Tool]:
+    def list_tools(self)->list[Tool]:
         return list(self._tools.values())
 
-    def to_schema(self)->list[dict[str,Any]]:
+    def to_schema(self)->list[Tool]:
         return [tool.to_schema() for tool in self._tools.values()]
 
     def tool(
@@ -34,7 +34,6 @@ class ToolRegistry:
             name:str,
             description:str,
             parameters:ToolParameters,
-            required:list[str],
              ):
         def decorator(func:Callable[..., Any] | Callable[..., Awaitable[Any]]):
             self.register(
@@ -42,7 +41,6 @@ class ToolRegistry:
                     name=name,
                     description=description,
                     parameters=parameters,
-                    required=required,
                     handler=func
                 )
             )

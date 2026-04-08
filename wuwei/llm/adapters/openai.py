@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 
 from .base import BaseAdapter
 from ..types import LLMResponse, Message, ToolCall, FunctionCall
+from ...tools import Tool
 
 
 class OpenAIAdapter(BaseAdapter):
@@ -12,7 +13,7 @@ class OpenAIAdapter(BaseAdapter):
         self.client=AsyncOpenAI(api_key=api_key,base_url=base_url)
         self.model = model
         self.default_params = kwargs
-    def build_request(self, messages: list[Message], tools: list[dict] | None = None, stream: bool | None = False,
+    def build_request(self, messages: list[Message], tools: list[Tool] | None = None, stream: bool | None = False,
                       **kwargs) -> dict[str, Any]:
         openai_messages = []
         for msg in messages:
@@ -32,8 +33,6 @@ class OpenAIAdapter(BaseAdapter):
 
             if msg.tool_call_id:
                 m["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                m["name"] = msg.name
             openai_messages.append(m)
 
         request = {
@@ -44,7 +43,8 @@ class OpenAIAdapter(BaseAdapter):
             **kwargs,
         }
         if tools:
-            request["tools"] = tools
+            request["tools"] = [tool.to_schema() for tool in tools]
+
         return request
 
     async def call(self, request: dict[str, Any]) -> Any:

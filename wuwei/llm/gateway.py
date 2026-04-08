@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Union
 from .adapters import OpenAIAdapter
 from .adapters.base import BaseAdapter
 from .types import Message, LLMResponse, LLMResponseChunk, FunctionCall, ToolCall
+from ..tools import Tool
 
 
 class LLMGateway:
@@ -32,7 +33,7 @@ class LLMGateway:
 
     async def generate(self,
                        messages: list[Message],
-                       tools: list[dict]|None=None,
+                       tools: list[Tool]|None=None,
                        stream:bool=False,
                        **kwargs
                        )->Union[LLMResponse, AsyncIterator[LLMResponseChunk]]:
@@ -41,7 +42,7 @@ class LLMGateway:
         else:
             return await self._generate_single(messages=messages,tools=tools,**kwargs)
 
-    async def _generate_single(self,messages:list[Message],tools:list[dict],**kwargs)->LLMResponse:
+    async def _generate_single(self,messages:list[Message],tools:list[Tool],**kwargs)->LLMResponse:
         request=self.adapter.build_request(messages=messages,tools=tools,stream=False,**kwargs)
         start=time.monotonic()
         last_exception = None
@@ -59,7 +60,7 @@ class LLMGateway:
                 await asyncio.sleep(wait_time)
         raise last_exception
 
-    async def _generate_stream(self,messages:list[Message],tools:list[dict],**kwargs)->AsyncIterator[LLMResponseChunk]:
+    async def _generate_stream(self,messages:list[Message],tools:list[Tool],**kwargs)->AsyncIterator[LLMResponseChunk]:
         request = self.adapter.build_request(messages, tools, stream=True, **kwargs)
         stream = await self.adapter.call(request)
 
@@ -86,7 +87,7 @@ class LLMGateway:
                         pending[idx]["name"] = delta_item["name"]
                     if "arguments" in delta_item:
                         pending[idx]["arguments"] += delta_item["arguments"]
-
+            # print(f"pending: {pending}")
             # 构建输出 chunk
             out_chunk = LLMResponseChunk(content=content)
 
@@ -117,5 +118,5 @@ class LLMGateway:
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
                 }
-
+            # print(f"out_chunk: {out_chunk}")
             yield out_chunk

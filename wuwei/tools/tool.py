@@ -8,11 +8,17 @@ class ToolParameters(BaseModel):
     properties:dict[str, Any]={}
     required:list=[]
 
+    def to_schema(self)->dict[str, Any]:
+        return {
+            "type": self.type,
+            "properties": self.properties,
+            "required": self.required,
+        }
+
 class Tool(BaseModel):
     name:str
     description:str
     parameters:ToolParameters
-    required:list
     handler:Callable[..., Any] | Callable[..., Awaitable[Any]]
 
     def to_schema(self)->dict[str, Any]:
@@ -21,7 +27,7 @@ class Tool(BaseModel):
         "function": {
             "name": self.name,
             "description": self.description,
-            "parameters": self.parameters,
+            "parameters": self.parameters.to_schema(),
             }
         }
 
