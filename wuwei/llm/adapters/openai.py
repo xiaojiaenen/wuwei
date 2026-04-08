@@ -4,7 +4,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from .base import BaseAdapter
-from ..types import LLMResponseChunk, LLMResponse, Message, ToolCall, FunctionCall
+from ..types import LLMResponse, Message, ToolCall, FunctionCall
 
 
 class OpenAIAdapter(BaseAdapter):

@@ -10,7 +10,7 @@ from .types import Message, LLMResponse, LLMResponseChunk, FunctionCall, ToolCal
 
 class LLMGateway:
     def __init__(self,config:dict[str,Any]):
-        self.adapter=BaseAdapter
+        self.adapter:BaseAdapter
         provider = config.get("provider", "openai")
         self.adapter: BaseAdapter
         if provider == "openai":

@@ -6,7 +6,7 @@ from wuwei.tools.tool import Tool, ToolParameters
 
 
 class ToolRegistry:
-    def __init__(self,tools:list[Tool]|None=None):
+    def __init__(self):
         self._tools:dict[str,Tool]={}
 
     def register(self,tool:Tool)->Tool:
