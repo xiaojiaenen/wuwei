@@ -1,4 +1,5 @@
-from typing import Any, Callable, Awaitable
+import inspect
+from typing import Any, Callable, Awaitable, get_type_hints
 
 from pydantic import BaseModel
 
@@ -31,16 +32,69 @@ class ToolRegistry:
 
     def tool(
             self,
-            name:str,
-            description:str,
-            parameters:ToolParameters,
+            name:str=None,
+            description:str=None,
+            parameters:ToolParameters=None,
              ):
         def decorator(func:Callable[..., Any] | Callable[..., Awaitable[Any]]):
+            tool_name = name or func.__name__
+
+            # 自动生成工具描述
+            tool_description = description or func.__doc__ or f"执行{func.__name__}操作"
+            if parameters:
+                tool_parameters = parameters
+            else:
+                sig = inspect.signature(func)
+                properties = {}
+                required = []
+
+                # 获取类型注解
+                type_hints = get_type_hints(func)
+
+                for param_name, param in sig.parameters.items():
+                    # 跳过self参数
+                    if param_name == 'self':
+                        continue
+
+                    # 推断参数类型
+                    param_type = type_hints.get(param_name, str).__name__
+                    if param_type in ['int', 'float', 'complex']:
+                        param_type = 'number'
+                    elif param_type in ['list', 'tuple']:
+                        param_type = 'array'
+                    elif param_type in ['dict']:
+                        param_type = 'object'
+                    else:
+                        param_type = 'string'
+
+                    # 获取参数描述（从docstring中提取）
+                    param_description = f"参数 {param_name}"
+                    if func.__doc__:
+                        # 简单的docstring解析，提取参数描述
+                        for line in func.__doc__.split('\n'):
+                            line = line.strip()
+                            if line.startswith(f":param {param_name}:"):
+                                param_description = line.split(':', 2)[2].strip()
+                                break
+
+                    properties[param_name] = {
+                        "type": param_type,
+                        "description": param_description
+                    }
+
+                    # 非可选参数
+                    if param.default == inspect.Parameter.empty:
+                        required.append(param_name)
+
+                tool_parameters = ToolParameters(
+                    properties=properties,
+                    required=required
+                )
             self.register(
                 Tool(
-                    name=name,
-                    description=description,
-                    parameters=parameters,
+                    name=tool_name,
+                    description=tool_description,
+                    parameters=tool_parameters,
                     handler=func
                 )
             )
