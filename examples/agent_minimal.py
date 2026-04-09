@@ -3,9 +3,11 @@ import asyncio
 from wuwei.agent import Agent
 from wuwei.llm import LLMGateway
 from wuwei.tools import ToolRegistry
-
+from wuwei.tools.builtin import register_file_tools, register_time_tools
 
 registry = ToolRegistry()
+register_file_tools(registry)
+register_time_tools(registry)
 
 
 @registry.tool(description="查询一个城市的天气。")
@@ -28,10 +30,7 @@ async def get_weather(city: str) -> dict:
 
 def build_llm() -> LLMGateway:
     return LLMGateway.from_env(
-        env_prefix="WUWEI",
-        model="deepseek-chat",
-        base_url="https://api.deepseek.com",
-        temperature=0.2,
+        env_prefix="WUWEI"
     )
 
 
@@ -44,7 +43,7 @@ async def main() -> None:
     )
 
     session = agent.create_session(session_id="agent-minimal")
-    question = "请先调用工具，再告诉我北京天气怎么样。"
+    question = "请告诉我当前时间，再告诉我北京天气怎么样。"
 
     print("question:", question)
     print("answer:")
