@@ -28,12 +28,9 @@ async def get_weather(city: str) -> dict:
 
 def build_llm() -> LLMGateway:
     return LLMGateway.from_env(
-        provider="openai",
-        api_key_env="WUWEI_API_KEY",
-        base_url_env="WUWEI_BASE_URL",
-        model_env="WUWEI_MODEL",
-        default_model="deepseek-chat",
-        default_base_url="https://api.deepseek.com",
+        env_prefix="WUWEI",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com",
         temperature=0.2,
     )
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Union
 
 from .adapters import OpenAIAdapter
@@ -11,6 +12,10 @@ from ..tools import Tool
 
 
 class LLMGateway:
+    _DEFAULT_ENV_SEARCH_DEPTH = 3
+    _DEFAULT_ENV_FILES = (".env", "env")
+    _DEFAULT_ENV_PREFIX = "OPENAI"
+
     def __init__(self, config: dict[str, Any]):
         """根据显式配置初始化模型网关。"""
         self.adapter: BaseAdapter
@@ -36,42 +41,103 @@ class LLMGateway:
     @classmethod
     def from_env(
         cls,
-        provider: str = "openai",
         *,
-        api_key_env: str = "OPENAI_API_KEY",
-        base_url_env: str = "OPENAI_BASE_URL",
-        model_env: str = "OPENAI_MODEL",
-        default_base_url: str | None = None,
-        default_model: str | None = None,
+        env_prefix: str | None = None,
+        env_file: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
         **config: Any,
     ) -> "LLMGateway":
         """
-        从环境变量构造 LLMGateway。
+        从环境变量创建 LLMGateway。
 
-        设计原则：
-        - 只帮用户读取最常见的 api_key / base_url / model
-        - 其他参数例如 temperature / timeout 仍然走显式传参
-        - 用户可以自定义环境变量名，避免框架写死业务约定
+        这个方法只保留少量高频参数：
+        - `env_prefix`：决定读取哪组环境变量，默认是 `OPENAI`
+        - `env_file`：显式指定 env 文件
+        - `model` / `base_url`：作为显式覆盖值
+
+        环境变量命名固定为：
+        - `{PREFIX}_API_KEY`
+        - `{PREFIX}_BASE_URL`
+        - `{PREFIX}_MODEL`
+
+        框架内部会自动在当前目录和最多 3 层父目录中查找 `.env` / `env`，
+        这部分不再暴露给用户配置，保持接口简单。
         """
-        api_key = os.getenv(api_key_env)
+        prefix = (env_prefix or cls._DEFAULT_ENV_PREFIX).upper()
+        api_key_env = f"{prefix}_API_KEY"
+        base_url_env = f"{prefix}_BASE_URL"
+        model_env = f"{prefix}_MODEL"
+
+        file_values = cls._load_env_file(env_file=env_file)
+
+        api_key = os.getenv(api_key_env) or file_values.get(api_key_env)
         if not api_key:
             raise ValueError(f"Missing required environment variable: {api_key_env}")
 
         env_config: dict[str, Any] = {
-            "provider": provider,
+            "provider": "openai",
             "api_key": api_key,
         }
 
-        base_url = os.getenv(base_url_env) or default_base_url
-        if base_url:
-            env_config["base_url"] = base_url
+        resolved_base_url = base_url or os.getenv(base_url_env) or file_values.get(base_url_env)
+        if resolved_base_url:
+            env_config["base_url"] = resolved_base_url
 
-        model = os.getenv(model_env) or default_model
-        if model:
-            env_config["model"] = model
+        resolved_model = model or os.getenv(model_env) or file_values.get(model_env)
+        if resolved_model:
+            env_config["model"] = resolved_model
 
         env_config.update(config)
         return cls(env_config)
+
+    @staticmethod
+    def _load_env_file(env_file: str | None = None) -> dict[str, str]:
+        """
+        尝试从 env 文件读取变量。
+
+        规则：
+        1. 如果显式传入 `env_file`，只读取这个文件
+        2. 否则自动查找当前目录和最多 3 层父目录中的 `.env` / `env`
+
+        注意：
+        - 这里只返回解析结果，不会修改 `os.environ`
+        - 这是一个轻量实现，不依赖 `python-dotenv`
+        """
+        candidate_paths: list[Path] = []
+        if env_file:
+            candidate_paths.append(Path(env_file))
+        else:
+            directories = [Path.cwd(), *Path.cwd().parents[: LLMGateway._DEFAULT_ENV_SEARCH_DEPTH]]
+            for directory in directories:
+                for filename in LLMGateway._DEFAULT_ENV_FILES:
+                    candidate_paths.append(directory / filename)
+
+        for path in candidate_paths:
+            if not path.exists() or not path.is_file():
+                continue
+
+            values: dict[str, str] = {}
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+
+                if not key:
+                    continue
+
+                if value and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1]
+
+                values[key] = value
+
+            return values
+
+        return {}
 
     async def generate(
         self,
@@ -85,7 +151,12 @@ class LLMGateway:
             return self._generate_stream(messages=messages, tools=tools, **kwargs)
         return await self._generate_single(messages=messages, tools=tools, **kwargs)
 
-    async def _generate_single(self, messages: list[Message], tools: list[Tool] | None, **kwargs) -> LLMResponse:
+    async def _generate_single(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None,
+        **kwargs,
+    ) -> LLMResponse:
         """发送一次非流式请求。"""
         request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
         start = time.monotonic()
@@ -101,7 +172,7 @@ class LLMGateway:
                 last_exception = exc
                 if attempt == self.retry_policy["max_attempts"] - 1:
                     raise
-                wait_time = 2 ** attempt
+                wait_time = 2**attempt
                 await asyncio.sleep(wait_time)
 
         raise last_exception
@@ -143,8 +214,8 @@ class LLMGateway:
             out_chunk = LLMResponseChunk(content=content)
 
             if finish_reason == "tool_calls":
-                complete = []
-                for idx, item in pending.items():
+                complete: list[ToolCall] = []
+                for item in pending.values():
                     if not item["id"] or not item["name"]:
                         continue
                     try:
