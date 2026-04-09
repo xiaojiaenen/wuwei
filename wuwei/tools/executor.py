@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -11,7 +12,14 @@ class ToolExecutor:
     def __init__(self, registry: ToolRegistry):
         self.registry = registry
 
-    async def execute(self, tool_calls: list[ToolCall]) -> list[Message]:
+    async def execute(
+        self,
+        tool_calls: list[ToolCall],
+        concurrent: bool = False,
+    ) -> list[Message]:
+        if concurrent and len(tool_calls) > 1:
+            return await asyncio.gather(*(self.execute_one(tool_call) for tool_call in tool_calls))
+
         results: list[Message] = []
         for tool_call in tool_calls:
             results.append(await self.execute_one(tool_call))
@@ -67,3 +75,23 @@ class ToolExecutor:
             return json.dumps(output, ensure_ascii=False, default=str)
         except TypeError:
             return json.dumps({"value": str(output)}, ensure_ascii=False)
+
+    @staticmethod
+    def extract_error_message(content: str | None) -> str | None:
+        if not content:
+            return None
+
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(payload, dict) or payload.get("ok") is not False:
+            return None
+
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return None
+
+        message = error.get("message")
+        return message if isinstance(message, str) else None

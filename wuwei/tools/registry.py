@@ -22,7 +22,7 @@ class ToolRegistry:
         del self._tools[tool.name]
 
     def get(self,name:str)->Tool|None:
-        return self._tools[name]
+        return self._tools.get(name)
 
     def list_tools(self)->list[Tool]:
         return list(self._tools.values())
@@ -60,6 +60,8 @@ class ToolRegistry:
                     param_type = type_hints.get(param_name, str).__name__
                     if param_type in ['int', 'float', 'complex']:
                         param_type = 'number'
+                    elif param_type in {"bool"}:
+                        param_type = "boolean"
                     elif param_type in ['list', 'tuple']:
                         param_type = 'array'
                     elif param_type in ['dict']:

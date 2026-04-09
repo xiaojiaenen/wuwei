@@ -1,15 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel
-
-
-class AgentConfig(BaseModel):
-    name: str="WUWEI AGENT"
-    system_prompt:str="你是一个有用的助手"
-    max_steps: int=10
 
 class BaseAgent(ABC):
     @abstractmethod
-    async def run(self,user_input:str)->Any:
+    async def run(self, user_input: str, session: Any | None = None, stream: bool = False) -> Any:
         pass

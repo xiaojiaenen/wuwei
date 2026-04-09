@@ -1,12 +1,13 @@
 import inspect
 from typing import Callable, Any, Awaitable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
 
 class ToolParameters(BaseModel):
     type:str="object"
-    properties:dict[str, Any]={}
-    required:list=[]
+    properties:dict[str, Any]=Field(default_factory=dict)
+    required:list=Field(default_factory=list)
 
     def to_schema(self)->dict[str, Any]:
         return {
@@ -32,9 +33,10 @@ class Tool(BaseModel):
         }
 
     async def invoke(self,args:dict[str, Any]|None=None)->Any:
+        args=args or {}
         if inspect.iscoroutinefunction(self.handler):
             return await self.handler(**args)
-        result=await self.handler(**args)
+        result=self.handler(**args)
         if inspect.isawaitable(result):
             return await result
         return result
