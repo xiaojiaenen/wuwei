@@ -6,6 +6,8 @@ from wuwei.tools import Tool, ToolExecutor
 
 
 class AgentRunner:
+    """普通单 agent 的运行时执行器。"""
+
     def __init__(
         self,
         llm: LLMGateway,
@@ -19,27 +21,32 @@ class AgentRunner:
         self.session = session
 
     async def run(self, user_input: str, stream: bool = False):
+        """执行一次普通 agent 运行。"""
         if stream:
             return self._run_stream(user_input)
         return await self._run_non_stream(user_input)
 
     def _append_tool_messages(self, tool_messages) -> None:
+        """把工具返回结果写回当前会话上下文。"""
         for tool_message in tool_messages:
             self.session.context.add_tool_message(tool_message.content or "", tool_message.tool_call_id)
 
     def _iter_tool_feedback_chunks(self, tool_messages):
+        """把工具错误包装成流式 chunk，便于上层统一消费。"""
         for tool_message in tool_messages:
             error_message = self.tool_executor.extract_error_message(tool_message.content)
             if error_message:
                 yield LLMResponseChunk(content=f"\n[工具执行错误] {error_message}\n")
 
     async def _execute_tool_calls(self, tool_calls):
+        """统一通过 ToolExecutor 执行工具调用。"""
         return await self.tool_executor.execute(
             tool_calls,
             concurrent=self.session.parallel_tool_calls,
         )
 
     async def _run_non_stream(self, user_input: str):
+        """非流式执行普通 agent。"""
         step_count = 0
         context = self.session.context
         context.add_user_message(user_input)
@@ -67,6 +74,7 @@ class AgentRunner:
         return limit_message
 
     async def _run_stream(self, user_input: str) -> AsyncIterator[LLMResponseChunk]:
+        """流式执行普通 agent。"""
         step_count = 0
         context = self.session.context
         context.add_user_message(user_input)

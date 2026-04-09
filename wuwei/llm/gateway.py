@@ -1,19 +1,21 @@
 import asyncio
 import json
+import os
 import time
 from typing import Any, AsyncIterator, Union
 
 from .adapters import OpenAIAdapter
 from .adapters.base import BaseAdapter
-from .types import Message, LLMResponse, LLMResponseChunk, FunctionCall, ToolCall
+from .types import FunctionCall, LLMResponse, LLMResponseChunk, Message, ToolCall
 from ..tools import Tool
 
 
 class LLMGateway:
-    def __init__(self,config:dict[str,Any]):
-        self.adapter:BaseAdapter
-        provider = config.get("provider", "openai")
+    def __init__(self, config: dict[str, Any]):
+        """根据显式配置初始化模型网关。"""
         self.adapter: BaseAdapter
+        provider = config.get("provider", "openai")
+
         if provider == "openai":
             adapter_kwargs = {
                 "api_key": config["api_key"],
@@ -31,41 +33,91 @@ class LLMGateway:
         self.retry_policy = config.get("retry", {"max_attempts": 3})
         self.timeout = config.get("timeout", 60)
 
-    async def generate(self,
-                       messages: list[Message],
-                       tools: list[Tool]|None=None,
-                       stream:bool=False,
-                       **kwargs
-                       )->Union[LLMResponse, AsyncIterator[LLMResponseChunk]]:
-        if stream:
-            return self._generate_stream(messages=messages,tools=tools,**kwargs)
-        else:
-            return await self._generate_single(messages=messages,tools=tools,**kwargs)
+    @classmethod
+    def from_env(
+        cls,
+        provider: str = "openai",
+        *,
+        api_key_env: str = "OPENAI_API_KEY",
+        base_url_env: str = "OPENAI_BASE_URL",
+        model_env: str = "OPENAI_MODEL",
+        default_base_url: str | None = None,
+        default_model: str | None = None,
+        **config: Any,
+    ) -> "LLMGateway":
+        """
+        从环境变量构造 LLMGateway。
 
-    async def _generate_single(self,messages:list[Message],tools:list[Tool],**kwargs)->LLMResponse:
-        request=self.adapter.build_request(messages=messages,tools=tools,stream=False,**kwargs)
-        start=time.monotonic()
+        设计原则：
+        - 只帮用户读取最常见的 api_key / base_url / model
+        - 其他参数例如 temperature / timeout 仍然走显式传参
+        - 用户可以自定义环境变量名，避免框架写死业务约定
+        """
+        api_key = os.getenv(api_key_env)
+        if not api_key:
+            raise ValueError(f"Missing required environment variable: {api_key_env}")
+
+        env_config: dict[str, Any] = {
+            "provider": provider,
+            "api_key": api_key,
+        }
+
+        base_url = os.getenv(base_url_env) or default_base_url
+        if base_url:
+            env_config["base_url"] = base_url
+
+        model = os.getenv(model_env) or default_model
+        if model:
+            env_config["model"] = model
+
+        env_config.update(config)
+        return cls(env_config)
+
+    async def generate(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None = None,
+        stream: bool = False,
+        **kwargs,
+    ) -> Union[LLMResponse, AsyncIterator[LLMResponseChunk]]:
+        """统一处理单次和流式生成请求。"""
+        if stream:
+            return self._generate_stream(messages=messages, tools=tools, **kwargs)
+        return await self._generate_single(messages=messages, tools=tools, **kwargs)
+
+    async def _generate_single(self, messages: list[Message], tools: list[Tool] | None, **kwargs) -> LLMResponse:
+        """发送一次非流式请求。"""
+        request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
+        start = time.monotonic()
         last_exception = None
+
         for attempt in range(self.retry_policy["max_attempts"]):
             try:
-                raw=await asyncio.wait_for(self.adapter.call(request), timeout=self.timeout)
-                response=self.adapter.parse_response(raw)
+                raw = await asyncio.wait_for(self.adapter.call(request), timeout=self.timeout)
+                response = self.adapter.parse_response(raw)
                 response.latency_ms = int((time.monotonic() - start) * 1000)
                 return response
-            except Exception as e:
-                last_exception=e
+            except Exception as exc:
+                last_exception = exc
                 if attempt == self.retry_policy["max_attempts"] - 1:
                     raise
                 wait_time = 2 ** attempt
                 await asyncio.sleep(wait_time)
+
         raise last_exception
 
-    async def _generate_stream(self,messages:list[Message],tools:list[Tool],**kwargs)->AsyncIterator[LLMResponseChunk]:
+    async def _generate_stream(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None,
+        **kwargs,
+    ) -> AsyncIterator[LLMResponseChunk]:
+        """发送一次流式请求，并把 tool call 增量拼成完整结构。"""
         request = self.adapter.build_request(messages, tools, stream=True, **kwargs)
         stream = await self.adapter.call(request)
 
-        # 按 index 累积工具调用数据
-        pending: dict[int, dict[str, Any]] = {}  # index -> {"id": str, "name": str, "arguments": str}
+        # 按 index 累积工具调用增量。
+        pending: dict[int, dict[str, Any]] = {}
 
         async for chunk in stream:
             data = self.adapter.parse_stream_chunk(chunk)
@@ -87,36 +139,35 @@ class LLMGateway:
                         pending[idx]["name"] = delta_item["name"]
                     if "arguments" in delta_item:
                         pending[idx]["arguments"] += delta_item["arguments"]
-            # print(f"pending: {pending}")
-            # 构建输出 chunk
+
             out_chunk = LLMResponseChunk(content=content)
 
             if finish_reason == "tool_calls":
-                # 组装完整的 tool_calls
                 complete = []
-                for idx, data in pending.items():
-                    if not data["id"] or not data["name"]:
-                        continue  # 不完整，理论上不会发生
+                for idx, item in pending.items():
+                    if not item["id"] or not item["name"]:
+                        continue
                     try:
-                        args = json.loads(data["arguments"]) if data["arguments"] else {}
+                        args = json.loads(item["arguments"]) if item["arguments"] else {}
                     except json.JSONDecodeError:
                         args = {}
-                    complete.append(ToolCall(
-                        id=data["id"],
-                        type="function",
-                        function=FunctionCall(name=data["name"], arguments=args)
-                    ))
+                    complete.append(
+                        ToolCall(
+                            id=item["id"],
+                            type="function",
+                            function=FunctionCall(name=item["name"], arguments=args),
+                        )
+                    )
                 out_chunk.tool_calls_complete = complete
                 out_chunk.finish_reason = finish_reason
             elif finish_reason == "stop":
                 out_chunk.finish_reason = finish_reason
 
-            # 可选：在最后一个 chunk 中附上 usage
             if hasattr(chunk, "usage") and chunk.usage:
                 out_chunk.usage = {
                     "prompt_tokens": chunk.usage.prompt_tokens,
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
                 }
-            # print(f"out_chunk: {out_chunk}")
+
             yield out_chunk
