@@ -1,12 +1,17 @@
-from typing import AsyncIterator
+import asyncio
+from typing import AsyncIterator, TYPE_CHECKING
 
 from wuwei.agent.session import AgentSession
-from wuwei.llm import LLMGateway, LLMResponse, LLMResponseChunk
+from wuwei.llm import LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
+
+if TYPE_CHECKING:
+    from wuwei.planning import Task
 
 
 class AgentRunner:
-    """普通单 agent 的运行时执行器。"""
+    """单个 agent 会话的运行时执行器。"""
 
     def __init__(
         self,
@@ -14,67 +19,131 @@ class AgentRunner:
         tools: list[Tool],
         tool_executor: ToolExecutor,
         session: AgentSession,
+        hooks: HookManager | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.tool_executor = tool_executor
         self.session = session
+        self.hooks = hooks or HookManager()
 
-    async def run(self, user_input: str, stream: bool = False):
-        """执行一次普通 agent 运行。"""
+    async def run(
+        self,
+        user_input: str,
+        stream: bool = False,
+        task: "Task | None" = None,
+    ):
+        """执行一次 agent 运行。"""
         if stream:
-            return self._run_stream(user_input)
-        return await self._run_non_stream(user_input)
+            return self._run_stream(user_input, task=task)
+        return await self._run_non_stream(user_input, task=task)
 
-    def _append_tool_messages(self, tool_messages) -> None:
-        """把工具返回结果写回当前会话上下文。"""
+    def _copy_messages(self) -> list[Message]:
+        return [message.model_copy(deep=True) for message in self.session.context.get_messages()]
+
+    def _append_tool_messages(self, tool_messages: list[Message]) -> None:
+        """把工具输出写回当前会话上下文。"""
         for tool_message in tool_messages:
             self.session.context.add_tool_message(tool_message.content or "", tool_message.tool_call_id)
 
-    def _iter_tool_feedback_chunks(self, tool_messages):
-        """把工具错误包装成流式 chunk，便于上层统一消费。"""
+    def _iter_tool_feedback_chunks(self, tool_messages: list[Message]):
+        """把工具错误转换成流式 chunk，便于上层统一消费。"""
         for tool_message in tool_messages:
             error_message = self.tool_executor.extract_error_message(tool_message.content)
             if error_message:
                 yield LLMResponseChunk(content=f"\n[工具执行错误] {error_message}\n")
 
-    async def _execute_tool_calls(self, tool_calls):
-        """统一通过 ToolExecutor 执行工具调用。"""
-        return await self.tool_executor.execute(
-            tool_calls,
-            concurrent=self.session.parallel_tool_calls,
-        )
+    async def _execute_one_tool_call(
+        self,
+        tool_call: ToolCall,
+        *,
+        step: int,
+        task: "Task | None" = None,
+    ) -> Message:
+        await self.hooks.before_tool(self.session, tool_call, step=step, task=task)
+        tool_message = await self.tool_executor.execute_one(tool_call)
+        await self.hooks.after_tool(self.session, tool_call, tool_message, step=step, task=task)
+        return tool_message
 
-    async def _run_non_stream(self, user_input: str):
-        """非流式执行普通 agent。"""
+    async def _execute_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        *,
+        step: int,
+        task: "Task | None" = None,
+    ) -> list[Message]:
+        """执行工具调用，并在每次调用前后触发 hook。"""
+        if self.session.parallel_tool_calls and len(tool_calls) > 1:
+            return await asyncio.gather(
+                *(self._execute_one_tool_call(tool_call, step=step, task=task) for tool_call in tool_calls)
+            )
+
+        results: list[Message] = []
+        for tool_call in tool_calls:
+            results.append(await self._execute_one_tool_call(tool_call, step=step, task=task))
+        return results
+
+    async def _run_non_stream(
+        self,
+        user_input: str,
+        *,
+        task: "Task | None" = None,
+    ):
+        """非流式执行路径。"""
         step_count = 0
         context = self.session.context
         context.add_user_message(user_input)
 
         while step_count < self.session.max_steps:
-            response: LLMResponse = await self.llm.generate(
-                context.get_messages(),
-                tools=self.tools,
+            messages = self._copy_messages()
+            tools = list(self.tools)
+            messages, tools = await self.hooks.before_llm(
+                self.session,
+                messages,
+                tools,
+                step=step_count,
+                task=task,
             )
+
+            response: LLMResponse = await self.llm.generate(
+                messages,
+                tools=tools,
+            )
+            await self.hooks.after_llm(
+                self.session,
+                response,
+                step=step_count,
+                task=task,
+            )
+
             context.add_ai_message(
                 response.message.content,
                 response.message.tool_calls,
             )
 
             if response.finish_reason == "tool_calls" and response.message.tool_calls:
-                tool_messages = await self._execute_tool_calls(response.message.tool_calls)
+                tool_messages = await self._execute_tool_calls(
+                    response.message.tool_calls,
+                    step=step_count,
+                    task=task,
+                )
                 self._append_tool_messages(tool_messages)
                 step_count += 1
                 continue
 
             return response.message.content
 
-        limit_message = "任务未完成，已达到最大步骤限制"
+        limit_message = "任务未完成，已达到最大步骤限制。"
         context.add_ai_message(limit_message)
         return limit_message
 
-    async def _run_stream(self, user_input: str) -> AsyncIterator[LLMResponseChunk]:
-        """流式执行普通 agent。"""
+    async def _run_stream(
+        self,
+        user_input: str,
+        *,
+        task: "Task | None" = None,
+    ) -> AsyncIterator[LLMResponseChunk]:
+        """流式执行路径。"""
         step_count = 0
         context = self.session.context
         context.add_user_message(user_input)
@@ -82,10 +151,19 @@ class AgentRunner:
         while step_count < self.session.max_steps:
             content_parts: list[str] = []
             full_tool_calls = None
+            messages = self._copy_messages()
+            tools = list(self.tools)
+            messages, tools = await self.hooks.before_llm(
+                self.session,
+                messages,
+                tools,
+                step=step_count,
+                task=task,
+            )
 
             stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
-                context.get_messages(),
-                tools=self.tools,
+                messages,
+                tools=tools,
                 stream=True,
             )
 
@@ -100,7 +178,11 @@ class AgentRunner:
             context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
 
             if full_tool_calls:
-                tool_messages = await self._execute_tool_calls(full_tool_calls)
+                tool_messages = await self._execute_tool_calls(
+                    full_tool_calls,
+                    step=step_count,
+                    task=task,
+                )
                 self._append_tool_messages(tool_messages)
                 for chunk in self._iter_tool_feedback_chunks(tool_messages):
                     yield chunk
@@ -109,6 +191,6 @@ class AgentRunner:
 
             return
 
-        limit_message = "任务未完成，已达到最大步骤限制"
+        limit_message = "任务未完成，已达到最大步骤限制。"
         context.add_ai_message(limit_message)
         yield LLMResponseChunk(content=limit_message, finish_reason="stop")
