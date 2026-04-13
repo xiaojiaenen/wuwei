@@ -17,6 +17,7 @@ class Agent(BaseSessionAgent):
         default_system_prompt: str = "你是一个有用的助手",
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
+        hooks = None,
     ) -> None:
         super().__init__(
             llm=llm,
@@ -24,6 +25,7 @@ class Agent(BaseSessionAgent):
             default_system_prompt=default_system_prompt,
             default_max_steps=default_max_steps,
             default_parallel_tool_calls=default_parallel_tool_calls,
+            hooks=hooks
         )
 
     def create_runner(self, session: AgentSession) -> AgentRunner:
@@ -33,6 +35,7 @@ class Agent(BaseSessionAgent):
             tools=self.tool_registry.list_tools(),
             tool_executor=self.tool_executor,
             session=session,
+            hooks=self.hooks
         )
 
     async def run(

@@ -19,6 +19,7 @@ class PlanAgent(BaseSessionAgent):
         default_system_prompt: str = "你是一个有用的助手",
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
+        hooks=None,
     ) -> None:
         super().__init__(
             llm=llm,
@@ -26,6 +27,7 @@ class PlanAgent(BaseSessionAgent):
             default_system_prompt=default_system_prompt,
             default_max_steps=default_max_steps,
             default_parallel_tool_calls=default_parallel_tool_calls,
+            hooks=hooks,
         )
         self.planner = planner or Planner.create_planner(llm=self.llm)
 
@@ -37,6 +39,7 @@ class PlanAgent(BaseSessionAgent):
             tool_executor=self.tool_executor,
             session=session,
             planner=self.planner,
+            hooks=self.hooks,
         )
 
     async def plan(

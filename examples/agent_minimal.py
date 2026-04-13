@@ -2,6 +2,7 @@ import asyncio
 
 from wuwei.agent import Agent
 from wuwei.llm import LLMGateway
+from wuwei.runtime import ConsoleHook
 from wuwei.tools import ToolRegistry
 from wuwei.tools.builtin import register_file_tools, register_time_tools
 
@@ -40,6 +41,7 @@ async def main() -> None:
         tools=registry,
         default_system_prompt="你是一个会优先调用工具获取天气信息的助手。",
         default_max_steps=5,
+        hooks=[ConsoleHook()],
     )
 
     session = agent.create_session(session_id="agent-minimal")

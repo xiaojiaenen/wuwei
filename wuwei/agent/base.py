@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from wuwei.agent.session import AgentSession
 from wuwei.llm import LLMGateway
+from wuwei.runtime.hooks import RuntimeHook, HookManager
 from wuwei.tools import Tool, ToolExecutor, ToolRegistry
 
 
@@ -32,6 +33,7 @@ class BaseSessionAgent(BaseAgent):
         default_system_prompt: str = "你是一个有用的助手",
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
+        hooks: list[RuntimeHook] | HookManager | None = None,
     ) -> None:
         """初始化公共依赖和默认会话配置。"""
         self.llm = llm
@@ -47,6 +49,7 @@ class BaseSessionAgent(BaseAgent):
                 self.tool_registry.register(tool)
 
         self.tool_executor = ToolExecutor(self.tool_registry)
+        self.hooks = hooks if isinstance(hooks, HookManager) else HookManager(hooks)
         self._sessions: dict[str, AgentSession] = {}
 
     def create_session(
