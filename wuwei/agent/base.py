@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from wuwei.agent.session import AgentSession
 from wuwei.llm import LLMGateway
-from wuwei.runtime.hooks import RuntimeHook, HookManager
+from wuwei.runtime.hooks import HookManager, RuntimeHook
 from wuwei.tools import Tool, ToolExecutor, ToolRegistry
 
 

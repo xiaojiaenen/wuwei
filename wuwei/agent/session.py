@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 
 from wuwei.memory import Context
-from wuwei.skill.skill import Skill
 
 
 @dataclass
@@ -13,7 +12,6 @@ class AgentSession:
     max_steps: int = 10
     parallel_tool_calls: bool = False
     context: Context = field(init=False)
-    active_skills: list[Skill] = field(init=False)
 
     def __post_init__(self) -> None:
         """初始化后立刻重置上下文。"""

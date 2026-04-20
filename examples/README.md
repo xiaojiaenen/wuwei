@@ -37,6 +37,11 @@ $env:WUWEI_MODEL="deepseek-chat"
   - 演示 `AgentSession` 多轮复用
   - 第二轮问题会读取第一轮上下文
 
+- `examples/agent_skill_minimal.py`
+  - 最小 skill 示例
+  - 演示 `list_skills -> load_skill -> run_skill_python_script`
+  - skill 文件位于 `examples/skills/`
+
 - `examples/plan_agent_minimal.py`
   - 最小 `PlanAgent` 示例
   - 演示先规划再执行

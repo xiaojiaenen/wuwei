@@ -2,7 +2,9 @@ from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent, PlanAg
 from wuwei.llm import FunctionCall, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
 from wuwei.memory import Context
 from wuwei.planning import Planner, Task, TaskList
-from wuwei.runtime import AgentRunner, PlannerExecutorRunner
+from wuwei.runtime import AgentRunner, PlannerExecutorRunner, SkillHook
+from wuwei.skill.fs_provider import FileSystemSkillProvider
+from wuwei.skill.skill import Skill, SkillManager, SkillProvider
 from wuwei.tools import Tool, ToolExecutor, ToolParameters, ToolRegistry
 
 __all__ = [
@@ -20,6 +22,11 @@ __all__ = [
     "PlanAgent",
     "Planner",
     "PlannerExecutorRunner",
+    "Skill",
+    "SkillHook",
+    "SkillManager",
+    "SkillProvider",
+    "FileSystemSkillProvider",
     "Task",
     "TaskList",
     "Tool",

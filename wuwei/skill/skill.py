@@ -4,16 +4,18 @@ from typing import Protocol
 
 @dataclass
 class Skill:
-    name:str
-    description:str
+    name: str
+    description: str
     instruction: str
+    path: str | None = None
+
 
 class SkillProvider(Protocol):
     def list_skills(self) -> list[Skill]:
         """列出所有可用的技能。"""
         ...
 
-    def load_skill_instruction(self, skill_name: str) -> str|None:
+    def load_skill_instruction(self, skill_name: str) -> str | None:
         """根据技能名称加载完整的指令正文（Markdown 主体）"""
         ...
 
@@ -36,11 +38,16 @@ class SkillManager:
 
     def get_skill(self, skill_name: str) -> Skill:
         """根据技能名称获取技能元数据。"""
-        provider, meta = self._meta_index[skill_name]
+        try:
+            provider, meta = self._meta_index[skill_name]
+        except KeyError as exc:
+            raise ValueError(f"Skill '{skill_name}' not found") from exc
         return meta
 
-    def load_skill_instruction(self, skill_name: str) -> str|None:
+    def load_skill_instruction(self, skill_name: str) -> str | None:
         """根据技能名称加载完整的指令正文（Markdown 主体）"""
-        provider, meta = self._meta_index[skill_name]
+        try:
+            provider, meta = self._meta_index[skill_name]
+        except KeyError as exc:
+            raise ValueError(f"Skill '{skill_name}' not found") from exc
         return provider.load_skill_instruction(skill_name)
-

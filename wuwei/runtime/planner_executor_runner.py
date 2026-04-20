@@ -1,4 +1,5 @@
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from wuwei.agent.session import AgentSession
 from wuwei.llm import LLMGateway, LLMResponseChunk
@@ -188,9 +189,7 @@ class PlannerExecutorRunner:
         parts: list[str] = []
         for task in sorted(completed_tasks, key=lambda item: item.id):
             parts.append(
-                f"Task {task.id}\n"
-                f"描述：{task.description}\n"
-                f"结果：{task.result or ''}"
+                f"Task {task.id}\n" f"描述：{task.description}\n" f"结果：{task.result or ''}"
             )
         return "\n\n".join(parts)
 
