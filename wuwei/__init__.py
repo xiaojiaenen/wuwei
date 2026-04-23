@@ -1,7 +1,7 @@
 from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent, PlanAgent
-from wuwei.llm import FunctionCall, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.llm import AgentEvent, AgentRunResult, FunctionCall, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
 from wuwei.memory import Context
-from wuwei.planning import Planner, Task, TaskList
+from wuwei.planning import PlanRunResult, Planner, Task, TaskList
 from wuwei.runtime import AgentRunner, PlannerExecutorRunner, SkillHook
 from wuwei.skill.fs_provider import FileSystemSkillProvider
 from wuwei.skill.skill import Skill, SkillManager, SkillProvider
@@ -14,6 +14,8 @@ __all__ = [
     "BaseAgent",
     "BaseSessionAgent",
     "Context",
+    "AgentEvent",
+    "AgentRunResult",
     "FunctionCall",
     "LLMGateway",
     "LLMResponse",
@@ -21,6 +23,7 @@ __all__ = [
     "Message",
     "PlanAgent",
     "Planner",
+    "PlanRunResult",
     "PlannerExecutorRunner",
     "Skill",
     "SkillHook",

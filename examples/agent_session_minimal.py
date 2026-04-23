@@ -52,10 +52,12 @@ async def main() -> None:
     second_answer = await agent.run(second_question, session=session, stream=False)
 
     print("question 1:", first_question)
-    print("answer 1:", first_answer)
+    print("answer 1:", first_answer.content)
+    print("usage 1:", first_answer.usage)
     print()
     print("question 2:", second_question)
-    print("answer 2:", second_answer)
+    print("answer 2:", second_answer.content)
+    print("usage 2:", second_answer.usage)
 
 
 if __name__ == "__main__":

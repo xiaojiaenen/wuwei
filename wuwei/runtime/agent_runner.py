@@ -1,8 +1,9 @@
 import asyncio
+import time
 from typing import AsyncIterator, TYPE_CHECKING
 
 from wuwei.agent.session import AgentSession
-from wuwei.llm import AgentEvent, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.llm import AgentEvent, AgentRunResult, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
 from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
 
@@ -38,6 +39,52 @@ class AgentRunner:
             return self._run_stream(user_input, task=task)
         return await self._run_non_stream(user_input, task=task)
 
+    @staticmethod
+    def _empty_usage() -> dict[str, int]:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    def _merge_usage(self, total: dict[str, int], usage: dict[str, int] | None) -> None:
+        if not usage:
+            return
+
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total[key] = total.get(key, 0) + usage.get(key, 0)
+
+    def _set_session_run_stats(
+        self,
+        *,
+        usage: dict[str, int],
+        latency_ms: int,
+        llm_calls: int,
+    ) -> None:
+        self.session.last_usage = dict(usage)
+        self.session.last_latency_ms = latency_ms
+        self.session.last_llm_calls = llm_calls
+
+    def _build_run_result(
+        self,
+        *,
+        content: str,
+        usage: dict[str, int],
+        latency_ms: int,
+        llm_calls: int,
+    ) -> AgentRunResult:
+        self._set_session_run_stats(
+            usage=usage,
+            latency_ms=latency_ms,
+            llm_calls=llm_calls,
+        )
+        return AgentRunResult(
+            content=content,
+            usage=dict(usage),
+            latency_ms=latency_ms,
+            llm_calls=llm_calls,
+        )
+
     async def stream_events(
         self,
         user_input: str,
@@ -46,6 +93,9 @@ class AgentRunner:
     ) -> AsyncIterator[AgentEvent]:
         """以结构化事件流的形式执行一次 agent 运行。"""
         step_count = 0
+        llm_calls = 0
+        total_latency_ms = 0
+        total_usage = self._empty_usage()
         context = self.session.context
         context.add_user_message(user_input)
 
@@ -63,11 +113,13 @@ class AgentRunner:
                     task=task,
                 )
 
+                llm_start = time.monotonic()
                 stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
                     messages,
                     tools=tools,
                     stream=True,
                 )
+                llm_calls += 1
 
                 async for chunk in stream:
                     if chunk.content:
@@ -79,9 +131,12 @@ class AgentRunner:
                             data={"content": chunk.content},
                         )
 
+                    self._merge_usage(total_usage, chunk.usage)
+
                     if chunk.tool_calls_complete:
                         full_tool_calls = chunk.tool_calls_complete
 
+                total_latency_ms += int((time.monotonic() - llm_start) * 1000)
                 context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
 
                 if full_tool_calls:
@@ -136,6 +191,16 @@ class AgentRunner:
                     type="done",
                     session_id=self.session.session_id,
                     step=step_count,
+                    data={
+                        "usage": dict(total_usage),
+                        "latency_ms": total_latency_ms,
+                        "llm_calls": llm_calls,
+                    },
+                )
+                self._set_session_run_stats(
+                    usage=total_usage,
+                    latency_ms=total_latency_ms,
+                    llm_calls=llm_calls,
                 )
                 return
 
@@ -151,9 +216,24 @@ class AgentRunner:
                 type="done",
                 session_id=self.session.session_id,
                 step=step_count,
-                data={"reason": "max_steps"},
+                data={
+                    "reason": "max_steps",
+                    "usage": dict(total_usage),
+                    "latency_ms": total_latency_ms,
+                    "llm_calls": llm_calls,
+                },
+            )
+            self._set_session_run_stats(
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
             )
         except Exception as exc:
+            self._set_session_run_stats(
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
+            )
             yield AgentEvent(
                 type="error",
                 session_id=self.session.session_id,
@@ -161,6 +241,9 @@ class AgentRunner:
                 data={
                     "message": str(exc),
                     "error_type": type(exc).__name__,
+                    "usage": dict(total_usage),
+                    "latency_ms": total_latency_ms,
+                    "llm_calls": llm_calls,
                 },
             )
 
@@ -217,51 +300,76 @@ class AgentRunner:
     ):
         """非流式执行路径。"""
         step_count = 0
+        llm_calls = 0
+        total_latency_ms = 0
+        total_usage = self._empty_usage()
         context = self.session.context
         context.add_user_message(user_input)
 
-        while step_count < self.session.max_steps:
-            messages = self._copy_messages()
-            tools = list(self.tools)
-            messages, tools = await self.hooks.before_llm(
-                self.session,
-                messages,
-                tools,
-                step=step_count,
-                task=task,
-            )
-
-            response: LLMResponse = await self.llm.generate(
-                messages,
-                tools=tools,
-            )
-            await self.hooks.after_llm(
-                self.session,
-                response,
-                step=step_count,
-                task=task,
-            )
-
-            context.add_ai_message(
-                response.message.content,
-                response.message.tool_calls,
-            )
-
-            if response.finish_reason == "tool_calls" and response.message.tool_calls:
-                tool_messages = await self._execute_tool_calls(
-                    response.message.tool_calls,
+        try:
+            while step_count < self.session.max_steps:
+                messages = self._copy_messages()
+                tools = list(self.tools)
+                messages, tools = await self.hooks.before_llm(
+                    self.session,
+                    messages,
+                    tools,
                     step=step_count,
                     task=task,
                 )
-                self._append_tool_messages(tool_messages)
-                step_count += 1
-                continue
 
-            return response.message.content
+                response: LLMResponse = await self.llm.generate(
+                    messages,
+                    tools=tools,
+                )
+                llm_calls += 1
+                total_latency_ms += response.latency_ms
+                self._merge_usage(total_usage, response.usage)
 
-        limit_message = "任务未完成，已达到最大步骤限制。"
-        context.add_ai_message(limit_message)
-        return limit_message
+                await self.hooks.after_llm(
+                    self.session,
+                    response,
+                    step=step_count,
+                    task=task,
+                )
+
+                context.add_ai_message(
+                    response.message.content,
+                    response.message.tool_calls,
+                )
+
+                if response.finish_reason == "tool_calls" and response.message.tool_calls:
+                    tool_messages = await self._execute_tool_calls(
+                        response.message.tool_calls,
+                        step=step_count,
+                        task=task,
+                    )
+                    self._append_tool_messages(tool_messages)
+                    step_count += 1
+                    continue
+
+                return self._build_run_result(
+                    content=response.message.content or "",
+                    usage=total_usage,
+                    latency_ms=total_latency_ms,
+                    llm_calls=llm_calls,
+                )
+
+            limit_message = "任务未完成，已达到最大步骤限制。"
+            context.add_ai_message(limit_message)
+            return self._build_run_result(
+                content=limit_message,
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
+            )
+        except Exception:
+            self._set_session_run_stats(
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
+            )
+            raise
 
     async def _run_stream(
         self,
@@ -271,52 +379,78 @@ class AgentRunner:
     ) -> AsyncIterator[LLMResponseChunk]:
         """流式执行路径。"""
         step_count = 0
+        llm_calls = 0
+        total_latency_ms = 0
+        total_usage = self._empty_usage()
         context = self.session.context
         context.add_user_message(user_input)
 
-        while step_count < self.session.max_steps:
-            content_parts: list[str] = []
-            full_tool_calls = None
-            messages = self._copy_messages()
-            tools = list(self.tools)
-            messages, tools = await self.hooks.before_llm(
-                self.session,
-                messages,
-                tools,
-                step=step_count,
-                task=task,
-            )
-
-            stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
-                messages,
-                tools=tools,
-                stream=True,
-            )
-
-            async for chunk in stream:
-                if chunk.content:
-                    content_parts.append(chunk.content)
-                    yield chunk
-
-                if chunk.tool_calls_complete:
-                    full_tool_calls = chunk.tool_calls_complete
-
-            context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
-
-            if full_tool_calls:
-                tool_messages = await self._execute_tool_calls(
-                    full_tool_calls,
+        try:
+            while step_count < self.session.max_steps:
+                content_parts: list[str] = []
+                full_tool_calls = None
+                messages = self._copy_messages()
+                tools = list(self.tools)
+                messages, tools = await self.hooks.before_llm(
+                    self.session,
+                    messages,
+                    tools,
                     step=step_count,
                     task=task,
                 )
-                self._append_tool_messages(tool_messages)
-                for chunk in self._iter_tool_feedback_chunks(tool_messages):
-                    yield chunk
-                step_count += 1
-                continue
 
-            return
+                llm_start = time.monotonic()
+                stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
+                    messages,
+                    tools=tools,
+                    stream=True,
+                )
+                llm_calls += 1
 
-        limit_message = "任务未完成，已达到最大步骤限制。"
-        context.add_ai_message(limit_message)
-        yield LLMResponseChunk(content=limit_message, finish_reason="stop")
+                async for chunk in stream:
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        yield chunk
+
+                    self._merge_usage(total_usage, chunk.usage)
+
+                    if chunk.tool_calls_complete:
+                        full_tool_calls = chunk.tool_calls_complete
+
+                total_latency_ms += int((time.monotonic() - llm_start) * 1000)
+                context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
+
+                if full_tool_calls:
+                    tool_messages = await self._execute_tool_calls(
+                        full_tool_calls,
+                        step=step_count,
+                        task=task,
+                    )
+                    self._append_tool_messages(tool_messages)
+                    for chunk in self._iter_tool_feedback_chunks(tool_messages):
+                        yield chunk
+                    step_count += 1
+                    continue
+
+                self._set_session_run_stats(
+                    usage=total_usage,
+                    latency_ms=total_latency_ms,
+                    llm_calls=llm_calls,
+                )
+                return
+
+            limit_message = "任务未完成，已达到最大步骤限制。"
+            context.add_ai_message(limit_message)
+            self._set_session_run_stats(
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
+            )
+            yield LLMResponseChunk(content=limit_message, finish_reason="stop")
+        except Exception:
+            self._set_session_run_stats(
+                usage=total_usage,
+                latency_ms=total_latency_ms,
+                llm_calls=llm_calls,
+            )
+            raise

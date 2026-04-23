@@ -2,8 +2,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from wuwei.agent.session import AgentSession
-from wuwei.llm import LLMGateway, LLMResponseChunk
-from wuwei.planning import Planner, Task
+from wuwei.llm import AgentEvent, AgentRunResult, LLMGateway, LLMResponseChunk
+from wuwei.planning import PlanRunResult, Planner, Task
 from wuwei.runtime.agent_runner import AgentRunner
 from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
@@ -28,16 +28,89 @@ class PlannerExecutorRunner:
         self.planner = planner or Planner.create_planner(llm=self.llm)
         self.hooks = hooks or HookManager()
         self.last_tasks: list[Task] = []
+        self.last_plan_usage = self._empty_usage()
+        self.last_plan_latency_ms = 0
+        self.last_plan_llm_calls = 0
+        self.last_execution_usage = self._empty_usage()
+        self.last_execution_latency_ms = 0
+        self.last_execution_llm_calls = 0
+
+    @staticmethod
+    def _empty_usage() -> dict[str, int]:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    def _merge_usage(self, total: dict[str, int], usage: dict[str, int] | None) -> None:
+        if not usage:
+            return
+
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total[key] = total.get(key, 0) + usage.get(key, 0)
+
+    def _capture_plan_stats(self) -> None:
+        self.last_plan_usage = dict(getattr(self.planner, "last_usage", self._empty_usage()))
+        self.last_plan_latency_ms = int(getattr(self.planner, "last_latency_ms", 0))
+        self.last_plan_llm_calls = int(getattr(self.planner, "last_llm_calls", 0))
+
+    def _set_execution_stats(
+        self,
+        *,
+        usage: dict[str, int],
+        latency_ms: int,
+        llm_calls: int,
+    ) -> None:
+        self.last_execution_usage = dict(usage)
+        self.last_execution_latency_ms = latency_ms
+        self.last_execution_llm_calls = llm_calls
+
+    def _build_plan_run_result(self, tasks: list[Task]) -> PlanRunResult:
+        total_usage = self._empty_usage()
+        self._merge_usage(total_usage, self.last_plan_usage)
+        self._merge_usage(total_usage, self.last_execution_usage)
+
+        total_latency_ms = self.last_plan_latency_ms + self.last_execution_latency_ms
+        total_llm_calls = self.last_plan_llm_calls + self.last_execution_llm_calls
+
+        self.session.last_usage = dict(total_usage)
+        self.session.last_latency_ms = total_latency_ms
+        self.session.last_llm_calls = total_llm_calls
+
+        return PlanRunResult(
+            tasks=tasks,
+            usage=total_usage,
+            latency_ms=total_latency_ms,
+            llm_calls=total_llm_calls,
+            planner_usage=dict(self.last_plan_usage),
+            planner_latency_ms=self.last_plan_latency_ms,
+            planner_llm_calls=self.last_plan_llm_calls,
+            execution_usage=dict(self.last_execution_usage),
+            execution_latency_ms=self.last_execution_latency_ms,
+            execution_llm_calls=self.last_execution_llm_calls,
+        )
 
     async def run(self, user_input: str, stream: bool = False) -> Any:
         """先规划，再执行。"""
         tasks = await self.plan(user_input)
-        return await self.execute(user_input, tasks, stream=stream)
+        if stream:
+            return await self.execute(user_input, tasks, stream=stream)
+
+        tasks = await self.execute(user_input, tasks, stream=False)
+        return self._build_plan_run_result(tasks)
+
+    async def stream_events(self, goal: str) -> AsyncIterator[AgentEvent]:
+        """先规划，再以结构化事件流执行。"""
+        tasks = await self.plan(goal)
+        async for event in self.execute_events(goal, tasks):
+            yield event
 
     async def plan(self, goal: str) -> list[Task]:
         """只做任务规划，不执行任务。"""
         tasks = await self.planner.plan_task(goal)
         self.last_tasks = tasks
+        self._capture_plan_stats()
         return tasks
 
     async def execute(
@@ -52,8 +125,16 @@ class PlannerExecutorRunner:
             return self._execute_stream(goal, tasks)
         return await self._execute_non_stream(goal, tasks)
 
-    async def _execute_non_stream(self, goal: str, tasks: list[Task]) -> list[Task]:
-        """按依赖顺序非流式执行任务图。"""
+    async def execute_events(
+        self,
+        goal: str,
+        tasks: list[Task],
+    ) -> AsyncIterator[AgentEvent]:
+        """按依赖顺序输出任务执行事件流。"""
+        self.last_tasks = tasks
+        execution_usage = self._empty_usage()
+        execution_latency_ms = 0
+        execution_llm_calls = 0
         tasks_by_id, dependencies = self._index_tasks(tasks)
 
         while True:
@@ -63,9 +144,58 @@ class PlannerExecutorRunner:
                 break
 
             for task in ready_tasks:
-                await self._execute_task_non_stream(goal, task, tasks_by_id, dependencies)
+                async for event in self._execute_task_events(goal, task, tasks_by_id, dependencies):
+                    if event.type == "done":
+                        self._merge_usage(
+                            execution_usage,
+                            event.data.get("usage") if isinstance(event.data, dict) else None,
+                        )
+                        execution_latency_ms += int(event.data.get("latency_ms", 0))
+                        execution_llm_calls += int(event.data.get("llm_calls", 0))
+                    yield event
 
         self._mark_unresolved_tasks(tasks_by_id)
+        self._set_execution_stats(
+            usage=execution_usage,
+            latency_ms=execution_latency_ms,
+            llm_calls=execution_llm_calls,
+        )
+        total_usage = self._empty_usage()
+        self._merge_usage(total_usage, self.last_plan_usage)
+        self._merge_usage(total_usage, execution_usage)
+        self.session.last_usage = total_usage
+        self.session.last_latency_ms = self.last_plan_latency_ms + execution_latency_ms
+        self.session.last_llm_calls = self.last_plan_llm_calls + execution_llm_calls
+
+    async def _execute_non_stream(self, goal: str, tasks: list[Task]) -> list[Task]:
+        """按依赖顺序非流式执行任务图。"""
+        execution_usage = self._empty_usage()
+        execution_latency_ms = 0
+        execution_llm_calls = 0
+        tasks_by_id, dependencies = self._index_tasks(tasks)
+
+        while True:
+            self._mark_blocked_tasks(tasks_by_id, dependencies)
+            ready_tasks = self._get_ready_tasks(tasks_by_id, dependencies)
+            if not ready_tasks:
+                break
+
+            for task in ready_tasks:
+                result = await self._execute_task_non_stream(goal, task, tasks_by_id, dependencies)
+                if result is not None:
+                    self._merge_usage(execution_usage, result.usage)
+                    execution_latency_ms += result.latency_ms
+                    execution_llm_calls += result.llm_calls
+
+        self._mark_unresolved_tasks(tasks_by_id)
+        self._set_execution_stats(
+            usage=execution_usage,
+            latency_ms=execution_latency_ms,
+            llm_calls=execution_llm_calls,
+        )
+        self.session.last_usage = dict(execution_usage)
+        self.session.last_latency_ms = execution_latency_ms
+        self.session.last_llm_calls = execution_llm_calls
         return tasks
 
     async def _execute_stream(
@@ -74,6 +204,11 @@ class PlannerExecutorRunner:
         tasks: list[Task],
     ) -> AsyncIterator[LLMResponseChunk]:
         """按依赖顺序流式执行任务图。"""
+        self._set_execution_stats(
+            usage=self._empty_usage(),
+            latency_ms=0,
+            llm_calls=0,
+        )
         tasks_by_id, dependencies = self._index_tasks(tasks)
 
         while True:
@@ -87,6 +222,9 @@ class PlannerExecutorRunner:
                     yield chunk
 
         self._mark_unresolved_tasks(tasks_by_id)
+        self.session.last_usage = dict(self.last_execution_usage)
+        self.session.last_latency_ms = self.last_execution_latency_ms
+        self.session.last_llm_calls = self.last_execution_llm_calls
 
     def _index_tasks(self, tasks: list[Task]) -> tuple[dict[int, Task], dict[int, list[int]]]:
         """建立任务索引，并把 next 反转成依赖列表。"""
@@ -199,7 +337,7 @@ class PlannerExecutorRunner:
         task: Task,
         tasks_by_id: dict[int, Task],
         dependencies: dict[int, list[int]],
-    ) -> None:
+    ) -> AgentRunResult | None:
         """以非流式方式执行单个任务。"""
         dependency_tasks = self._get_dependency_tasks(task, tasks_by_id, dependencies)
         completed_task_results = self._format_completed_task_results(dependency_tasks)
@@ -213,12 +351,15 @@ class PlannerExecutorRunner:
         runner = self._create_runner(task_session)
 
         try:
-            task.result = await runner.run(prompt, stream=False, task=task)
+            result: AgentRunResult = await runner.run(prompt, stream=False, task=task)
+            task.result = result.content
             task.status = "completed"
+            return result
         except Exception as exc:
             task.result = None
             task.error = str(exc)
             task.status = "failed"
+            return None
         finally:
             await self.hooks.on_task_end(self.session, task)
 
@@ -257,6 +398,61 @@ class PlannerExecutorRunner:
             task.error = str(exc)
             task.status = "failed"
             yield LLMResponseChunk(content=f"\n[任务失败] Task {task.id}: {task.error}\n")
+        finally:
+            self._merge_usage(self.last_execution_usage, task_session.last_usage)
+            self.last_execution_latency_ms += task_session.last_latency_ms
+            self.last_execution_llm_calls += task_session.last_llm_calls
+            await self.hooks.on_task_end(self.session, task)
+
+    async def _execute_task_events(
+        self,
+        goal: str,
+        task: Task,
+        tasks_by_id: dict[int, Task],
+        dependencies: dict[int, list[int]],
+    ) -> AsyncIterator[AgentEvent]:
+        """以结构化事件流方式执行单个任务。"""
+        dependency_tasks = self._get_dependency_tasks(task, tasks_by_id, dependencies)
+        completed_task_results = self._format_completed_task_results(dependency_tasks)
+        prompt = self._build_prompt(goal, task, completed_task_results)
+
+        task.status = "in_progress"
+        task.error = None
+        await self.hooks.on_task_start(self.session, task)
+
+        task_session = self._create_task_session(task.id)
+        runner = self._create_runner(task_session)
+
+        try:
+            async for event in runner.stream_events(prompt, task=task):
+                event_data = dict(event.data)
+                event_data["task_id"] = task.id
+                event_data["task_description"] = task.description
+                event_data["root_session_id"] = self.session.session_id
+                yield event.model_copy(update={"data": event_data})
+
+            last_message = task_session.context.get_last_message()
+            if last_message and last_message.role == "assistant":
+                task.result = last_message.content
+            else:
+                task.result = None
+            task.status = "completed"
+        except Exception as exc:
+            task.result = None
+            task.error = str(exc)
+            task.status = "failed"
+            yield AgentEvent(
+                type="error",
+                session_id=task_session.session_id,
+                step=0,
+                data={
+                    "message": task.error,
+                    "error_type": type(exc).__name__,
+                    "task_id": task.id,
+                    "task_description": task.description,
+                    "root_session_id": self.session.session_id,
+                },
+            )
         finally:
             await self.hooks.on_task_end(self.session, task)
 

@@ -42,6 +42,8 @@ class OpenAIAdapter(BaseAdapter):
             **self.default_params,
             **kwargs,
         }
+        if stream and "stream_options" not in request:
+            request["stream_options"] = {"include_usage": True}
         if tools:
             request["tools"] = [tool.to_schema() for tool in tools]
 

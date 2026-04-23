@@ -24,3 +24,36 @@ class TaskList(BaseModel):
     """任务列表包装对象。"""
 
     tasks: list[Task] = Field(default_factory=list, description="任务列表。")
+
+
+class PlanRunResult(BaseModel):
+    """一次 plan-and-execute 运行的汇总结果。"""
+
+    tasks: list[Task] = Field(default_factory=list)
+    usage: dict[str, int] = Field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    latency_ms: int = 0
+    llm_calls: int = 0
+    planner_usage: dict[str, int] = Field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    planner_latency_ms: int = 0
+    planner_llm_calls: int = 0
+    execution_usage: dict[str, int] = Field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    execution_latency_ms: int = 0
+    execution_llm_calls: int = 0

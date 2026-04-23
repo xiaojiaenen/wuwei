@@ -37,3 +37,16 @@ class AgentEvent(BaseModel):
     session_id: str
     step: int
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunResult(BaseModel):
+    content: str
+    usage: dict[str, int] = Field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    latency_ms: int = 0
+    llm_calls: int = 0

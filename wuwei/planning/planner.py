@@ -7,6 +7,17 @@ class Planner:
 
     def __init__(self, llm: LLMGateway) -> None:
         self.llm = llm
+        self.last_usage = self._empty_usage()
+        self.last_latency_ms = 0
+        self.last_llm_calls = 0
+
+    @staticmethod
+    def _empty_usage() -> dict[str, int]:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
     def _build_plan_prompt(self, goal: str) -> str:
         """构造任务规划提示词。"""
@@ -47,11 +58,18 @@ class Planner:
 
     async def plan_task(self, goal: str) -> list[Task]:
         """调用模型生成任务计划。"""
+        self.last_usage = self._empty_usage()
+        self.last_latency_ms = 0
+        self.last_llm_calls = 0
+
         response: LLMResponse = await self.llm.generate(
             messages=[Message(role="user", content=self._build_plan_prompt(goal))],
             stream=False,
             response_format={"type": "json_object"},
         )
+        self.last_usage = dict(response.usage)
+        self.last_latency_ms = response.latency_ms
+        self.last_llm_calls = 1
         content = response.message.content
         if not content:
             raise ValueError("Planner 未返回任何内容")
