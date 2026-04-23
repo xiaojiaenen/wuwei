@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from wuwei import ToolRegistry
+from wuwei.tools import ToolRegistry
 
 
 def register_time_tools(registry: ToolRegistry) -> ToolRegistry:

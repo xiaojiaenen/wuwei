@@ -1,10 +1,12 @@
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
 from wuwei.llm import LLMGateway
 from wuwei.runtime import AgentRunner
 from wuwei.tools import Tool, ToolRegistry
+
+ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
 
 
 class Agent(BaseSessionAgent):
@@ -48,3 +50,36 @@ class Agent(BaseSessionAgent):
         current_session = session or self.create_or_get_session()
         runner = self.create_runner(current_session)
         return await runner.run(user_input, stream=stream)
+
+    @classmethod
+    def from_env(
+            cls,
+            *,
+            builtin_tools: list[str] | None = None,
+            tools: list[ToolLike] | None = None,
+            system_prompt: str = "你是一个有用的助手",
+            max_steps: int = 10,
+            parallel_tool_calls: bool = False,
+            hooks=None,
+            **llm_kwargs,
+    ) -> "Agent":
+        llm = LLMGateway.from_env(**llm_kwargs)
+        registry = ToolRegistry.from_builtin(builtin_tools)
+
+        for item in tools or []:
+            if isinstance(item, Tool):
+                registry.register(item)
+                continue
+            if callable(item):
+                registry.register_callable(item)
+                continue
+            raise TypeError(f"tools 只支持 Tool 或可调用对象，收到: {type(item).__name__}")
+
+        return cls(
+            llm=llm,
+            tools=registry,
+            default_system_prompt=system_prompt,
+            default_max_steps=max_steps,
+            default_parallel_tool_calls=parallel_tool_calls,
+            hooks=hooks,
+        )

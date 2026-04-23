@@ -1,6 +1,6 @@
 from markitdown import MarkItDown
 
-from wuwei.tools import ToolRegistry
+from wuwei.tools.registry import ToolRegistry
 
 
 def register_file_tools(registry: ToolRegistry):

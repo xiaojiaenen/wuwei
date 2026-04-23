@@ -1,17 +1,8 @@
 import asyncio
 
 from wuwei.agent import Agent
-from wuwei.llm import LLMGateway
 from wuwei.runtime import ConsoleHook
-from wuwei.tools import ToolRegistry
-from wuwei.tools.builtin import register_file_tools, register_time_tools
 
-registry = ToolRegistry()
-register_file_tools(registry)
-register_time_tools(registry)
-
-
-@registry.tool(description="查询一个城市的天气。")
 async def get_weather(city: str) -> dict:
     weather_data = {
         "北京": {"city": "北京", "condition": "sunny", "temperature_c": 25},
@@ -29,18 +20,13 @@ async def get_weather(city: str) -> dict:
     )
 
 
-def build_llm() -> LLMGateway:
-    return LLMGateway.from_env(
-        env_prefix="WUWEI"
-    )
-
-
 async def main() -> None:
-    agent = Agent(
-        llm=build_llm(),
-        tools=registry,
-        default_system_prompt="你是一个会优先调用工具获取天气信息的助手。",
-        default_max_steps=5,
+    agent = Agent.from_env(
+        env_prefix="WUWEI",
+        builtin_tools=["file", "time"],
+        tools=[get_weather],
+        system_prompt="你是一个会优先调用工具获取天气信息的助手。",
+        max_steps=5,
         hooks=[ConsoleHook()],
     )
 

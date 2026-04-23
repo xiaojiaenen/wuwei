@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from wuwei.skill.skill import SkillManager
-from wuwei.tools import ToolRegistry
+from wuwei.tools.registry import ToolRegistry
 
 SKILL_SCRIPT_TIMEOUT_SECONDS = 10
 SKILL_SCRIPT_OUTPUT_LIMIT = 4000

@@ -1,15 +1,27 @@
 import inspect
-from typing import Any, Callable, Awaitable, get_type_hints
+from typing import Any, Awaitable, Callable, get_type_hints
 
 from pydantic import BaseModel
 
-from wuwei.tools.builtin import BUILTIN_TOOL_REGISTRARS
 from wuwei.tools.tool import Tool, ToolParameters
 
 
 class ToolRegistry:
     def __init__(self):
         self._tools:dict[str,Tool]={}
+
+    @classmethod
+    def from_builtin(cls, names: list[str] | None = None) -> "ToolRegistry":
+        from wuwei.tools.builtin import BUILTIN_TOOL_REGISTRARS
+
+        registry = cls()
+        for name in names or []:
+            try:
+                registrar = BUILTIN_TOOL_REGISTRARS[name]
+            except KeyError as exc:
+                raise ValueError(f"未知的内置工具: {name}") from exc
+            registrar(registry)
+        return registry
 
     def register(self,tool:Tool)->Tool:
         if tool.name in self._tools:
@@ -30,6 +42,26 @@ class ToolRegistry:
 
     def to_schema(self)->list[Tool]:
         return [tool.to_schema() for tool in self._tools.values()]
+
+    def register_callable(
+        self,
+        func: Callable[..., Any] | Callable[..., Awaitable[Any]],
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        parameters: ToolParameters | None = None,
+    ) -> Tool:
+        tool_name = name or func.__name__
+        self.tool(
+            name=tool_name,
+            description=description,
+            parameters=parameters,
+        )(func)
+
+        tool = self.get(tool_name)
+        if tool is None:
+            raise ValueError(f"工具 {tool_name} 注册失败")
+        return tool
 
     def tool(
             self,
@@ -103,14 +135,3 @@ class ToolRegistry:
             )
             return func
         return decorator
-
-    @classmethod
-    def from_builtin(cls, names: list[str]) -> "ToolRegistry":
-        registry = cls()
-        for name in names:
-            try:
-                registrar = BUILTIN_TOOL_REGISTRARS[name]
-            except KeyError as exc:
-                raise ValueError(f"未知的内置工具: {name}") from exc
-            registrar(registry)
-        return registry
