@@ -3,6 +3,7 @@ from typing import Any, Callable, Awaitable, get_type_hints
 
 from pydantic import BaseModel
 
+from wuwei.tools.builtin import BUILTIN_TOOL_REGISTRARS
 from wuwei.tools.tool import Tool, ToolParameters
 
 
@@ -102,3 +103,14 @@ class ToolRegistry:
             )
             return func
         return decorator
+
+    @classmethod
+    def from_builtin(cls, names: list[str]) -> "ToolRegistry":
+        registry = cls()
+        for name in names:
+            try:
+                registrar = BUILTIN_TOOL_REGISTRARS[name]
+            except KeyError as exc:
+                raise ValueError(f"未知的内置工具: {name}") from exc
+            registrar(registry)
+        return registry
