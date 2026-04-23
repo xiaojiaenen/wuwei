@@ -1,8 +1,9 @@
+from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable
 
 from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
-from wuwei.llm import LLMGateway
+from wuwei.llm import AgentEvent, LLMGateway
 from wuwei.runtime import AgentRunner
 from wuwei.tools import Tool, ToolRegistry
 
@@ -50,6 +51,17 @@ class Agent(BaseSessionAgent):
         current_session = session or self.create_or_get_session()
         runner = self.create_runner(current_session)
         return await runner.run(user_input, stream=stream)
+
+    def stream_events(
+        self,
+        user_input: str,
+        session: AgentSession | None = None,
+        session_id: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """以结构化事件流运行一次普通 agent。"""
+        current_session = session or self.create_or_get_session(session_id=session_id)
+        runner = self.create_runner(current_session)
+        return runner.stream_events(user_input)
 
     @classmethod
     def from_env(

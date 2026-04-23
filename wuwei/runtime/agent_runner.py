@@ -2,7 +2,7 @@ import asyncio
 from typing import AsyncIterator, TYPE_CHECKING
 
 from wuwei.agent.session import AgentSession
-from wuwei.llm import LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.llm import AgentEvent, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
 from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
 
@@ -37,6 +37,132 @@ class AgentRunner:
         if stream:
             return self._run_stream(user_input, task=task)
         return await self._run_non_stream(user_input, task=task)
+
+    async def stream_events(
+        self,
+        user_input: str,
+        *,
+        task: "Task | None" = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """以结构化事件流的形式执行一次 agent 运行。"""
+        step_count = 0
+        context = self.session.context
+        context.add_user_message(user_input)
+
+        try:
+            while step_count < self.session.max_steps:
+                content_parts: list[str] = []
+                full_tool_calls = None
+                messages = self._copy_messages()
+                tools = list(self.tools)
+                messages, tools = await self.hooks.before_llm(
+                    self.session,
+                    messages,
+                    tools,
+                    step=step_count,
+                    task=task,
+                )
+
+                stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
+                    messages,
+                    tools=tools,
+                    stream=True,
+                )
+
+                async for chunk in stream:
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        yield AgentEvent(
+                            type="text_delta",
+                            session_id=self.session.session_id,
+                            step=step_count,
+                            data={"content": chunk.content},
+                        )
+
+                    if chunk.tool_calls_complete:
+                        full_tool_calls = chunk.tool_calls_complete
+
+                context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
+
+                if full_tool_calls:
+                    for tool_call in full_tool_calls:
+                        yield AgentEvent(
+                            type="tool_start",
+                            session_id=self.session.session_id,
+                            step=step_count,
+                            data={
+                                "tool_name": tool_call.function.name,
+                                "args": tool_call.function.arguments,
+                                "tool_call_id": tool_call.id,
+                            },
+                        )
+
+                    tool_messages = await self._execute_tool_calls(
+                        full_tool_calls,
+                        step=step_count,
+                        task=task,
+                    )
+                    self._append_tool_messages(tool_messages)
+
+                    for tool_call, tool_message in zip(full_tool_calls, tool_messages):
+                        yield AgentEvent(
+                            type="tool_end",
+                            session_id=self.session.session_id,
+                            step=step_count,
+                            data={
+                                "tool_name": tool_call.function.name,
+                                "tool_call_id": tool_call.id,
+                                "output": tool_message.content,
+                            },
+                        )
+
+                        error_message = self.tool_executor.extract_error_message(tool_message.content)
+                        if error_message:
+                            yield AgentEvent(
+                                type="error",
+                                session_id=self.session.session_id,
+                                step=step_count,
+                                data={
+                                    "message": error_message,
+                                    "tool_name": tool_call.function.name,
+                                    "tool_call_id": tool_call.id,
+                                },
+                            )
+
+                    step_count += 1
+                    continue
+
+                yield AgentEvent(
+                    type="done",
+                    session_id=self.session.session_id,
+                    step=step_count,
+                )
+                return
+
+            limit_message = "任务未完成，已达到最大步骤限制。"
+            context.add_ai_message(limit_message)
+            yield AgentEvent(
+                type="text_delta",
+                session_id=self.session.session_id,
+                step=step_count,
+                data={"content": limit_message},
+            )
+            yield AgentEvent(
+                type="done",
+                session_id=self.session.session_id,
+                step=step_count,
+                data={"reason": "max_steps"},
+            )
+        except Exception as exc:
+            yield AgentEvent(
+                type="error",
+                session_id=self.session.session_id,
+                step=step_count,
+                data={
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     def _copy_messages(self) -> list[Message]:
         return [message.model_copy(deep=True) for message in self.session.context.get_messages()]

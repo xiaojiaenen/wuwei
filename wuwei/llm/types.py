@@ -1,6 +1,6 @@
-from typing import Literal, Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class FunctionCall(BaseModel):
     name:str
@@ -30,3 +30,10 @@ class LLMResponseChunk(BaseModel):
     tool_calls_complete: list[ToolCall]|None = None
     finish_reason: Literal["stop", "tool_calls", "length", "content_filter"]|None = None
     usage: dict[str, int]|None = None
+
+
+class AgentEvent(BaseModel):
+    type: Literal["text_delta", "tool_start", "tool_end", "done", "error"]
+    session_id: str
+    step: int
+    data: dict[str, Any] = Field(default_factory=dict)
