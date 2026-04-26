@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 from wuwei.memory import Context
 
@@ -11,6 +12,7 @@ class AgentSession:
     system_prompt: str = "你是一个有用的助手"
     max_steps: int = 10
     parallel_tool_calls: bool = False
+    metadata:dict[str,Any]=field(default_factory=dict)
     last_usage: dict[str, int] = field(
         default_factory=lambda: {
             "prompt_tokens": 0,

@@ -102,6 +102,7 @@ python examples/plan_agent_minimal.py
 更详细的说明可以看：
 
 - [examples/README.md](examples/README.md)
+- [docs/agent_framework_core_features.md](docs/agent_framework_core_features.md)：上下文压缩、滑动窗口、MySQL 历史、长期记忆、HITL 等核心能力实现指南
 
 ## 示例目录
 
