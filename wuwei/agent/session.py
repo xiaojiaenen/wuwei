@@ -12,7 +12,8 @@ class AgentSession:
     system_prompt: str = "你是一个有用的助手"
     max_steps: int = 10
     parallel_tool_calls: bool = False
-    metadata:dict[str,Any]=field(default_factory=dict)
+    summary: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     last_usage: dict[str, int] = field(
         default_factory=lambda: {
             "prompt_tokens": 0,
@@ -39,3 +40,33 @@ class AgentSession:
         }
         self.last_latency_ms = 0
         self.last_llm_calls = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "system_prompt": self.system_prompt,
+            "max_steps": self.max_steps,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "summary": self.summary,
+            "metadata": self.metadata,
+            "last_usage": self.last_usage,
+            "last_latency_ms": self.last_latency_ms,
+            "last_llm_calls": self.last_llm_calls,
+            "context": self.context.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentSession":
+        session = cls(
+            session_id=data["session_id"],
+            system_prompt=data.get("system_prompt", "你是一个有用的助手"),
+            max_steps=data.get("max_steps", 10),
+            parallel_tool_calls=data.get("parallel_tool_calls", False),
+            summary=data.get("summary"),
+            metadata=data.get("metadata", {}),
+            last_usage=data.get("last_usage", {}),
+            last_latency_ms=data.get("last_latency_ms", 0),
+            last_llm_calls=data.get("last_llm_calls", 0),
+        )
+        session.context = Context.from_dict(data.get("context", {}))
+        return session

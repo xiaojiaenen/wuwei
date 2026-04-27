@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 
-from wuwei import Message
+from wuwei.llm import Message
 
 
 @dataclass
 class ContextWindowConfig:
-    max_recent_turns:int=10
-    max_tool_chars:int=8000
-    include_summary:bool=True
+    max_recent_turns: int = 10
+    max_tool_chars: int = 8000
+    include_summary: bool = True
+
 
 def split_turns(messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
     system_messages: list[Message] = []
@@ -30,6 +31,7 @@ def split_turns(messages: list[Message]) -> tuple[list[Message], list[list[Messa
         turns.append(current_turn)
 
     return system_messages, turns
+
 
 class SimpleContextWindow:
     """构建本次发给模型的短上下文，不修改 session.context。"""

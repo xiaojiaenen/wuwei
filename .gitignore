@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+uv.lock
 
 # Virtual environments
 .venv
@@ -12,5 +13,11 @@ wheels/
 # IDE
 .idea/
 
+# Local environment / OS files
+.env
+.DS_Store
+
 # Example runtime output
 agent_notes.txt
+.wuwei_sessions/
+.wuwei_demo_sessions/

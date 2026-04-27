@@ -31,6 +31,16 @@ class RuntimeHook:
     ) -> None:
         pass
 
+    async def after_ai_message(
+        self,
+        session: "AgentSession",
+        message: "Message",
+        *,
+        step: int,
+        task: "Task | None" = None,
+    ) -> None:
+        pass
+
     async def before_tool(
         self,
         session: "AgentSession",
@@ -81,6 +91,10 @@ class HookManager:
     async def after_llm(self, session, response, *, step: int, task=None) -> None:
         for hook in self._hooks:
             await hook.after_llm(session, response, step=step, task=task)
+
+    async def after_ai_message(self, session, message, *, step: int, task=None) -> None:
+        for hook in self._hooks:
+            await hook.after_ai_message(session, message, step=step, task=task)
 
     async def before_tool(self, session, tool_call, *, step: int, task=None) -> None:
         for hook in self._hooks:

@@ -1,7 +1,7 @@
-from wuwei import Message
+from wuwei.llm import Message
 from wuwei.memory.context_compressor import ContextCompressor
 from wuwei.memory.context_window import SimpleContextWindow, ContextWindowConfig, split_turns
-from wuwei.runtime import RuntimeHook
+from wuwei.runtime.hooks import RuntimeHook
 
 
 class ContextCompressionHook(RuntimeHook):
@@ -52,7 +52,8 @@ class ContextCompressionHook(RuntimeHook):
             previous_summary=getattr(session, "summary", None),
             messages=self._flatten(turns_to_compress),
         )
-        metadata[self.METADATA_KEY] = compress_until
+        session.context.keep_last_turns(self.keep_recent_turns)
+        metadata[self.METADATA_KEY] = 0
 
     def _build_window(self, session, messages, tools):
         windowed_messages = self.context_window.build_messages(session, messages)

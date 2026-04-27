@@ -4,8 +4,11 @@ import wuwei.agent.agent as agent_module
 import wuwei.agent.plan_agent as plan_agent_module
 from wuwei.agent import Agent, AgentSession, PlanAgent
 from wuwei.llm import AgentRunResult, FunctionCall, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.memory.storage import FileStorage
 from wuwei.planning import PlanRunResult, Task
 from wuwei.runtime.agent_runner import AgentRunner
+from wuwei.runtime.hooks import HookManager
+from wuwei.runtime.storage_hook import StorageHook
 from wuwei.tools import Tool, ToolExecutor, ToolParameters, ToolRegistry
 
 
@@ -254,6 +257,31 @@ async def test_agent_runner_stream_events_yields_text_and_done() -> None:
         "total_tokens": 8,
     }
     assert runner.session.last_llm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_storage_hook_persists_streaming_assistant_message(tmp_path) -> None:
+    storage = FileStorage(tmp_path)
+    registry = ToolRegistry()
+    session = AgentSession(session_id="session-storage-stream")
+    runner = AgentRunner(
+        llm=FakeTextStreamLLM(),
+        tools=registry.list_tools(),
+        tool_executor=ToolExecutor(registry),
+        session=session,
+        hooks=HookManager([StorageHook(storage)]),
+    )
+
+    events = [event async for event in runner.stream_events("你好")]
+    stored_session = await storage.load("session-storage-stream")
+
+    assert [event.type for event in events] == ["text_delta", "text_delta", "done"]
+    assert stored_session is not None
+    assert [(message.role, message.content) for message in stored_session.context.get_messages()] == [
+        ("system", "你是一个有用的助手"),
+        ("user", "你好"),
+        ("assistant", "你好世界"),
+    ]
 
 
 @pytest.mark.asyncio

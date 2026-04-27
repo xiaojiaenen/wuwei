@@ -143,10 +143,16 @@ class AgentRunner:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                context.add_ai_message(
+                ai_message = context.add_ai_message(
                     "".join(content_parts),
                     tool_calls=full_tool_calls,
                     reasoning_content="".join(reasoning_parts) or None,
+                )
+                await self.hooks.after_ai_message(
+                    self.session,
+                    ai_message,
+                    step=step_count,
+                    task=task,
                 )
 
                 if full_tool_calls:
@@ -215,7 +221,13 @@ class AgentRunner:
                 return
 
             limit_message = "任务未完成，已达到最大步骤限制。"
-            context.add_ai_message(limit_message)
+            ai_message = context.add_ai_message(limit_message)
+            await self.hooks.after_ai_message(
+                self.session,
+                ai_message,
+                step=step_count,
+                task=task,
+            )
             yield AgentEvent(
                 type="text_delta",
                 session_id=self.session.session_id,
@@ -472,10 +484,16 @@ class AgentRunner:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                context.add_ai_message(
+                ai_message = context.add_ai_message(
                     "".join(content_parts),
                     tool_calls=full_tool_calls,
                     reasoning_content="".join(reasoning_parts) or None,
+                )
+                await self.hooks.after_ai_message(
+                    self.session,
+                    ai_message,
+                    step=step_count,
+                    task=task,
                 )
 
                 if full_tool_calls:
@@ -498,7 +516,13 @@ class AgentRunner:
                 return
 
             limit_message = "任务未完成，已达到最大步骤限制。"
-            context.add_ai_message(limit_message)
+            ai_message = context.add_ai_message(limit_message)
+            await self.hooks.after_ai_message(
+                self.session,
+                ai_message,
+                step=step_count,
+                task=task,
+            )
             self._set_session_run_stats(
                 usage=total_usage,
                 latency_ms=total_latency_ms,
