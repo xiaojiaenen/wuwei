@@ -31,8 +31,8 @@
 
 核心框架应该提供：
 
-1. 抽象协议：`HistoryStore`、`MemoryStore`、`ApprovalProvider`、`TokenCounter`、`ContextManager`。
-2. 默认实现：`InMemoryHistoryStore`、`SimpleTokenCounter`、`SlidingWindowContextManager`。
+1. 抽象协议：`HistoryStore`、`MemoryStore`、`ApprovalProvider`。
+2. 默认实现：`InMemoryHistoryStore`、`SimpleContextWindow`。
 3. Hook 封装：`ContextHook`、`HistoryHook`、`MemoryHook`、`HitlHook`。
 4. 示例适配器：MySQL、Redis、向量库可以放在 `examples/` 或可选 `integrations/`。
 5. 框架数据字段：只保留通用字段，例如 `session_id`、`metadata`、`namespace`、`tags`。
@@ -44,13 +44,13 @@ wuwei/
   memory/
     context.py                 # 已有：内存消息容器
     types.py                   # ContextState / MemoryRecord 等通用类型
-    token_counter.py           # TokenCounter 协议 + 简单实现
-    context_manager.py         # 上下文滑动 / 压缩策略
+    context_window.py          # 简单上下文窗口
+    context_compressor.py      # 上下文压缩协议 + LLM 实现
     history_store.py           # HistoryStore 协议 + InMemory 实现
     memory_store.py            # MemoryStore 协议 + InMemory 实现
   runtime/
     hooks.py                   # 已有：RuntimeHook / HookManager
-    context_hooks.py           # ContextWindowHook / CompressionHook
+    context_hook.py            # ContextWindowHook / ContextCompressionHook
     history_hook.py            # 持久化 Hook
     memory_hook.py             # 长期记忆检索 / 抽取 Hook
     hitl.py                    # HITL 协议和 Hook
@@ -140,30 +140,27 @@ session.metadata["channel"] = "cli"
 
 当前 `Context.get_messages()` 返回完整历史，`AgentRunner._copy_messages()` 每轮都会把完整历史交给模型。滑动窗口要解决：
 
-- 控制 prompt token；
-- 截断过长工具返回；
 - 保留最近对话；
 - 保留 `assistant(tool_calls) -> tool` 的合法结构；
-- 为后续压缩提供统一入口。
+- 截断过长工具返回；
+- 不修改 `session.context` 里的完整历史。
 
-### 3.2 按轮数是否合适
+### 3.2 第一版先简单做
 
-**按轮数是合适的，但不能只按轮数。**
-
-对 Wuwei 这种 Agent 框架，推荐默认策略是：
+第一版不需要做复杂 token 预算，也不需要引入 tokenizer。默认策略就三步：
 
 ```text
-按 turn 分组 -> 最多保留最近 N 轮 -> 按 token budget 校验 -> 截断 tool 输出 -> 必要时触发压缩
+保留 system -> 按 turn 保留最近 N 轮 -> 截断过长 tool 输出
 ```
 
-原因是：
+这样已经能解决大部分问题：
 
-- 按最近 N 轮非常直观，使用者容易理解和调参。
-- 按单条 message 裁剪不安全，可能留下 `tool` 消息却丢掉前面的 `assistant.tool_calls`。
-- Agent 的一轮消息长度差异很大，一轮工具调用可能包含几万甚至几十万字符。
-- 所以 `max_recent_turns` 适合作为第一层粗裁剪，`max_prompt_tokens` 才是最终安全边界。
+- 不会无限把完整历史塞给模型；
+- 不会把 `tool` 消息和对应的 `assistant.tool_calls` 拆散；
+- 不需要框架绑定某个 tokenizer；
+- 行为非常容易解释和调参。
 
-不推荐只这样做：
+不推荐直接按 message 数裁剪：
 
 ```python
 messages = messages[-20:]
@@ -171,235 +168,98 @@ messages = messages[-20:]
 
 因为它可能破坏工具调用结构。
 
-也不推荐只这样做：
+推荐默认参数只保留这几个：
 
 ```python
-turns = turns[-10:]
+max_recent_turns = 8   # 保留最近 8 轮
+max_tool_chars = 8000  # 单条 tool 输出最多保留 8000 字符
 ```
 
-因为最近 10 轮里可能包含超长文件、日志、网页或工具输出，仍然可能超过模型上下文。
+`max_prompt_tokens`、精确 `TokenCounter`、按模型上下文窗口自动推导预算，都可以放到后续增强版。第一版先不要把核心路径做复杂。
 
-推荐框架默认行为：
+### 3.3 简单配置
 
-1. 永远保留 `system`。
-2. 如果有 `summary`，放在 `system` 后面。
-3. 从最近 turn 往前选，最多选择 `max_recent_turns` 轮。
-4. 每加入一轮都用 `TokenCounter` 估算 token。
-5. 超过 `max_prompt_tokens` 就停止继续加入旧 turn。
-6. 对 `tool` 输出单独按 `max_tool_chars` 截断。
-7. 如果最近一轮仍然超限，进入兜底收缩或触发上下文压缩。
+上下文窗口、压缩器和 runtime hook 不建议放在一个文件里。推荐拆成：
 
-因此默认参数应该同时暴露：
-
-```python
-max_recent_turns = 12       # 可解释的轮数窗口
-max_prompt_tokens = 120000  # 真正的安全边界，通常由模型上下文窗口推导
-max_tool_chars = 8000       # 防止单个工具输出撑爆上下文
+```text
+wuwei/memory/context_window.py       # split_turns / SimpleContextWindow
+wuwei/memory/context_compressor.py   # ContextCompressor / LLMContextCompressor
+wuwei/runtime/context_hook.py        # ContextWindowHook / ContextCompressionHook
 ```
 
-### 3.3 TokenCounter 协议
+这样 `memory` 只处理消息和压缩能力，`runtime` 只负责接入 Agent 生命周期。
 
-文件：`wuwei/memory/token_counter.py`
-
-```python
-from typing import Protocol
-
-from wuwei.llm import Message
-from wuwei.tools import Tool
-
-
-class TokenCounter(Protocol):
-    """Token 统计接口。
-
-    框架不应该绑定某个 tokenizer。
-    使用者可以按模型实现自己的精确 token counter。
-    """
-
-    def count_text(self, text: str) -> int: ...
-
-    def count_message(self, message: Message) -> int: ...
-
-    def count_messages(self, messages: list[Message]) -> int: ...
-
-    def count_tools(self, tools: list[Tool]) -> int: ...
-
-
-class SimpleTokenCounter:
-    """粗略 token 估算器。
-
-    适合作为默认实现。真实生产环境可以替换为 tiktoken 或模型服务商 tokenizer。
-    """
-
-    def count_text(self, text: str) -> int:
-        if not text:
-            return 0
-        return max(1, len(text.encode("utf-8")) // 4)
-
-    def count_message(self, message: Message) -> int:
-        total = 4
-        total += self.count_text(message.role)
-        total += self.count_text(message.content or "")
-        if message.tool_call_id:
-            total += self.count_text(message.tool_call_id)
-        if message.tool_calls:
-            total += self.count_text(message.model_dump_json())
-        return total
-
-    def count_messages(self, messages: list[Message]) -> int:
-        return sum(self.count_message(message) for message in messages)
-
-    def count_tools(self, tools: list[Tool]) -> int:
-        return sum(self.count_text(tool.model_dump_json()) for tool in tools)
-```
-
-### 3.4 ContextManager 配置
-
-文件：`wuwei/memory/context_manager.py`
+文件：`wuwei/memory/context_window.py`
 
 ```python
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from wuwei.llm import Message
-from wuwei.memory.token_counter import SimpleTokenCounter, TokenCounter
-from wuwei.tools import Tool
-
-if TYPE_CHECKING:
-    from wuwei.agent.session import AgentSession
 
 
 @dataclass
 class ContextWindowConfig:
-    """上下文窗口配置。
-
-    max_prompt_tokens 是发给模型的最大 prompt 预算。
-    reserved_completion_tokens 用于预留模型输出空间。
-    reserved_tool_tokens 用于预留工具 schema 空间。
-    max_recent_turns 是第一层按轮数裁剪，保证行为可解释。
-    max_prompt_tokens 是第二层 token 预算兜底，保证不会超过模型上下文。
-    max_tool_chars 用于截断长工具输出。
-    """
-
-    model_context_window: int = 128_000
-    reserved_completion_tokens: int = 4_096
-    reserved_tool_tokens: int = 4_096
-    max_recent_turns: int = 12
+    max_recent_turns: int = 8
     max_tool_chars: int = 8_000
-
-    @property
-    def max_prompt_tokens(self) -> int:
-        return max(
-            1_000,
-            self.model_context_window
-            - self.reserved_completion_tokens
-            - self.reserved_tool_tokens,
-        )
+    include_summary: bool = True
 ```
 
-### 3.5 Turn 切分
+### 3.4 Turn 切分
 
-滑动窗口不能简单按 message 数裁剪，因为工具调用有协议约束。要按 turn 保留。
+窗口不能简单按 message 数裁剪，因为工具调用有协议约束。要按 turn 保留。
 
-文件：`wuwei/memory/context_manager.py`
+文件：`wuwei/memory/context_window.py`
 
 ```python
-class MessageTurnSplitter:
-    """把消息切成 system 和若干 turn。
+def split_turns(messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
+    system_messages: list[Message] = []
+    turns: list[list[Message]] = []
+    current_turn: list[Message] = []
 
-    约定：
-    - system 消息单独保留。
-    - 每个 user 开始一个新 turn。
-    - assistant/tool 跟随当前 turn。
-    - 如果历史开头不是 user，也归入当前临时 turn。
-    """
+    for message in messages:
+        if message.role == "system" and not turns and not current_turn:
+            system_messages.append(message)
+            continue
 
-    def split(self, messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
-        system_messages: list[Message] = []
-        turns: list[list[Message]] = []
-        current_turn: list[Message] = []
-
-        for message in messages:
-            if message.role == "system" and not turns and not current_turn:
-                system_messages.append(message)
-                continue
-
-            if message.role == "user":
-                if current_turn:
-                    turns.append(current_turn)
-                current_turn = [message]
-                continue
-
-            if not current_turn:
-                current_turn = [message]
-            else:
-                current_turn.append(message)
-
-        if current_turn:
+        if message.role == "user" and current_turn:
             turns.append(current_turn)
+            current_turn = [message]
+            continue
 
-        return system_messages, turns
+        current_turn.append(message)
+
+    if current_turn:
+        turns.append(current_turn)
+
+    return system_messages, turns
 ```
 
-### 3.6 SlidingWindowContextManager
+### 3.5 SimpleContextWindow
 
-文件：`wuwei/memory/context_manager.py`
+文件：`wuwei/memory/context_window.py`
 
 ```python
-class SlidingWindowContextManager:
-    """默认上下文窗口管理器。
+class SimpleContextWindow:
+    """构建本次发给模型的短上下文，不修改 session.context。"""
 
-    只负责构建“本次发给模型”的 messages，不直接修改 session.context。
-    这样可以保留完整内存历史，也方便 HistoryStore 持久化完整记录。
-
-    策略：
-    1. 按 turn 保留最近 max_recent_turns 轮。
-    2. 每轮加入前检查 token budget。
-    3. 对 tool 输出优先截断。
-    4. 仍超限时兜底收缩。
-    """
-
-    def __init__(
-        self,
-        config: ContextWindowConfig | None = None,
-        token_counter: TokenCounter | None = None,
-    ) -> None:
+    def __init__(self, config: ContextWindowConfig | None = None) -> None:
         self.config = config or ContextWindowConfig()
-        self.token_counter = token_counter or SimpleTokenCounter()
-        self.turn_splitter = MessageTurnSplitter()
 
-    async def build_messages(
-        self,
-        session: AgentSession,
-        messages: list[Message],
-        tools: list[Tool] | None = None,
-    ) -> list[Message]:
-        system_messages, turns = self.turn_splitter.split(messages)
+    def build_messages(self, session, messages: list[Message]) -> list[Message]:
+        system_messages, turns = split_turns(messages)
         summary_messages = self._build_summary_messages(session)
-        recent_turns = turns[-self.config.max_recent_turns :]
+        recent_turns = turns[-self.config.max_recent_turns:]
+        recent_messages = [
+            self._truncate_tool_message(message)
+            for turn in recent_turns
+            for message in turn
+        ]
+        return [*system_messages, *summary_messages, *recent_messages]
 
-        fixed_messages = [*system_messages, *summary_messages]
-        selected_turns: list[list[Message]] = []
-        tools_token_count = self.token_counter.count_tools(tools or [])
-        budget = self.config.max_prompt_tokens - tools_token_count
-
-        for turn in reversed(recent_turns):
-            normalized_turn = [self._truncate_tool_message(message) for message in turn]
-            candidate = [*fixed_messages, *self._flatten([normalized_turn, *selected_turns])]
-            if self.token_counter.count_messages(candidate) > budget and selected_turns:
-                break
-            selected_turns.insert(0, normalized_turn)
-
-        result = [*fixed_messages, *self._flatten(selected_turns)]
-
-        if self.token_counter.count_messages(result) > budget:
-            result = self._force_shrink(result, budget)
-
-        return result
-
-    def _build_summary_messages(self, session: AgentSession) -> list[Message]:
-        if not session.summary:
+    def _build_summary_messages(self, session) -> list[Message]:
+        if not self.config.include_summary or not getattr(session, "summary", None):
             return []
         return [
             Message(
@@ -425,47 +285,27 @@ class SlidingWindowContextManager:
                 )
             }
         )
-
-    def _force_shrink(self, messages: list[Message], budget: int) -> list[Message]:
-        """兜底收缩。
-
-        尽量保留 system、summary、最后一轮。真实实现可以更精细。
-        """
-        if len(messages) <= 2:
-            return messages
-
-        system_messages, turns = self.turn_splitter.split(messages)
-        for keep_turns in range(min(3, len(turns)), 0, -1):
-            candidate = [*system_messages, *self._flatten(turns[-keep_turns:])]
-            if self.token_counter.count_messages(candidate) <= budget:
-                return candidate
-        return [*system_messages, *turns[-1]] if turns else system_messages
-
-    def _flatten(self, turns: list[list[Message]]) -> list[Message]:
-        return [message for turn in turns for message in turn]
 ```
 
-### 3.7 ContextWindowHook
+这个实现故意不计算 token。它只做“别带完整历史”和“别拆坏工具调用结构”这两件事。
 
-文件：`wuwei/runtime/context_hooks.py`
+### 3.6 ContextWindowHook
+
+文件：`wuwei/runtime/context_hook.py`
 
 ```python
-from wuwei.memory.context_manager import SlidingWindowContextManager
+from wuwei.memory.context_window import SimpleContextWindow
 from wuwei.runtime.hooks import RuntimeHook
 
 
 class ContextWindowHook(RuntimeHook):
     """在每次 LLM 调用前裁剪 messages。"""
 
-    def __init__(self, context_manager: SlidingWindowContextManager | None = None) -> None:
-        self.context_manager = context_manager or SlidingWindowContextManager()
+    def __init__(self, context_window: SimpleContextWindow | None = None) -> None:
+        self.context_window = context_window or SimpleContextWindow()
 
     async def before_llm(self, session, messages, tools, *, step: int, task=None):
-        windowed_messages = await self.context_manager.build_messages(
-            session,
-            messages,
-            tools=tools,
-        )
+        windowed_messages = self.context_window.build_messages(session, messages)
         return windowed_messages, tools
 ```
 
@@ -473,13 +313,22 @@ class ContextWindowHook(RuntimeHook):
 
 ```python
 from wuwei.agent import Agent
-from wuwei.runtime.context_hooks import ContextWindowHook
+from wuwei.runtime.context_hook import ContextWindowHook
 
 agent = Agent.from_env(
     builtin_tools=["time"],
     hooks=[ContextWindowHook()],
 )
 ```
+
+### 3.7 后续增强
+
+只有当实际遇到上下文超限或成本不可控时，再引入增强版：
+
+- `TokenCounter`：按模型估算 prompt token；
+- `max_prompt_tokens`：按模型窗口做硬预算；
+- `ContextCompressionHook`：把旧 turn 压缩到 `session.summary`；
+- 更精细的工具输出裁剪：按工具类型设置不同上限。
 
 ## 4. 上下文压缩
 
@@ -569,77 +418,83 @@ class LLMContextCompressor:
 
 ### 4.3 压缩 Hook
 
-压缩 Hook 应只在超过阈值时触发，并且不要压缩最近几轮。
+压缩 Hook 也可以先按 turn 数触发，不必第一版就做 token 统计。它只压缩旧 turn，最近几轮原样保留。
 
-文件：`wuwei/runtime/context_hooks.py`
+文件：`wuwei/runtime/context_hook.py`
 
 ```python
 from wuwei.llm import Message
 from wuwei.memory.context_compressor import ContextCompressor
-from wuwei.memory.context_manager import MessageTurnSplitter, SlidingWindowContextManager
-from wuwei.memory.token_counter import SimpleTokenCounter, TokenCounter
+from wuwei.memory.context_window import (
+    ContextWindowConfig,
+    SimpleContextWindow,
+    split_turns,
+)
 from wuwei.runtime.hooks import RuntimeHook
 
 
 class ContextCompressionHook(RuntimeHook):
-    """超过 token 阈值时生成滚动摘要。"""
+    """历史 turn 过多时生成滚动摘要。"""
+
+    METADATA_KEY = "_context_compressed_until_turn"
 
     def __init__(
         self,
         compressor: ContextCompressor,
-        context_manager: SlidingWindowContextManager | None = None,
-        token_counter: TokenCounter | None = None,
-        soft_limit_tokens: int = 64_000,
+        context_window: SimpleContextWindow | None = None,
+        *,
+        compress_after_turns: int = 16,
         keep_recent_turns: int = 4,
     ) -> None:
+        if keep_recent_turns >= compress_after_turns:
+            raise ValueError("keep_recent_turns must be smaller than compress_after_turns")
+
         self.compressor = compressor
-        self.context_manager = context_manager or SlidingWindowContextManager()
-        self.token_counter = token_counter or SimpleTokenCounter()
-        self.soft_limit_tokens = soft_limit_tokens
+        self.compress_after_turns = compress_after_turns
         self.keep_recent_turns = keep_recent_turns
-        self.turn_splitter = MessageTurnSplitter()
+        self.context_window = context_window or SimpleContextWindow(
+            ContextWindowConfig(max_recent_turns=keep_recent_turns)
+        )
 
     async def before_llm(self, session, messages, tools, *, step: int, task=None):
-        if self.token_counter.count_messages(messages) <= self.soft_limit_tokens:
-            return await self._build_window(session, messages, tools)
+        _, turns = split_turns(messages)
 
-        old_messages, recent_messages = self._select_compressible_messages(messages)
-        if old_messages:
-            session.summary = await self.compressor.compress(
-                previous_summary=session.summary,
-                messages=old_messages,
-            )
+        if len(turns) > self.compress_after_turns:
+            await self._compress_old_turns(session, turns)
 
-        compacted_messages = self._merge_system_summary_and_recent(messages, recent_messages)
-        return await self._build_window(session, compacted_messages, tools)
+        return self._build_window(session, messages, tools)
 
-    async def _build_window(self, session, messages, tools):
-        windowed_messages = await self.context_manager.build_messages(session, messages, tools=tools)
+    async def _compress_old_turns(self, session, turns: list[list[Message]]) -> None:
+        metadata = getattr(session, "metadata", None)
+        if metadata is None:
+            metadata = {}
+            session.metadata = metadata
+
+        compress_until = len(turns) - self.keep_recent_turns
+        compressed_until = metadata.get(self.METADATA_KEY, 0)
+
+        if compressed_until >= compress_until:
+            return
+
+        turns_to_compress = turns[compressed_until:compress_until]
+        session.summary = await self.compressor.compress(
+            previous_summary=getattr(session, "summary", None),
+            messages=self._flatten(turns_to_compress),
+        )
+        metadata[self.METADATA_KEY] = compress_until
+
+    def _build_window(self, session, messages, tools):
+        windowed_messages = self.context_window.build_messages(session, messages)
         return windowed_messages, tools
-
-    def _select_compressible_messages(
-        self,
-        messages: list[Message],
-    ) -> tuple[list[Message], list[Message]]:
-        system_messages, turns = self.turn_splitter.split(messages)
-        if len(turns) <= self.keep_recent_turns:
-            return [], self._flatten(turns)
-
-        compressible_turns = turns[: -self.keep_recent_turns]
-        recent_turns = turns[-self.keep_recent_turns :]
-        return self._flatten(compressible_turns), self._flatten(recent_turns)
-
-    def _merge_system_summary_and_recent(
-        self,
-        original_messages: list[Message],
-        recent_messages: list[Message],
-    ) -> list[Message]:
-        system_messages, _ = self.turn_splitter.split(original_messages)
-        return [*system_messages, *recent_messages]
 
     def _flatten(self, turns: list[list[Message]]) -> list[Message]:
         return [message for turn in turns for message in turn]
 ```
+
+这个 Hook 内部已经调用 `SimpleContextWindow`，所以启用它时通常不需要再额外挂 `ContextWindowHook`。两者二选一即可：
+
+- 只想裁剪窗口：使用 `ContextWindowHook`；
+- 想自动压缩旧上下文并裁剪窗口：使用 `ContextCompressionHook`。
 
 使用方式：
 
@@ -647,12 +502,18 @@ class ContextCompressionHook(RuntimeHook):
 from wuwei.agent import Agent
 from wuwei.llm import LLMGateway
 from wuwei.memory.context_compressor import LLMContextCompressor
-from wuwei.runtime.context_hooks import ContextCompressionHook
+from wuwei.runtime.context_hook import ContextCompressionHook
 
 llm = LLMGateway.from_env()
 agent = Agent(
     llm=llm,
-    hooks=[ContextCompressionHook(compressor=LLMContextCompressor(llm))],
+    hooks=[
+        ContextCompressionHook(
+            compressor=LLMContextCompressor(llm),
+            compress_after_turns=16,
+            keep_recent_turns=4,
+        )
+    ],
 )
 ```
 
@@ -2010,7 +1871,7 @@ class BudgetHook(RuntimeHook):
         self._tool_calls.pop(session.session_id, None)
 ```
 
-如果想按 token 控制，需要和 `TokenCounter` 结合，在 `before_llm` 估算 prompt tokens，在 `after_llm/on_run_end` 读取真实 usage。
+如果后续确实要按 token 控制，可以再引入 `TokenCounter`，在 `before_llm` 估算 prompt tokens，并在 `after_llm/on_run_end` 读取真实 usage。
 
 ## 10. 推荐落地顺序
 
@@ -2018,9 +1879,8 @@ class BudgetHook(RuntimeHook):
 
 新增：
 
-- `wuwei/memory/token_counter.py`
-- `wuwei/memory/context_manager.py`
-- `wuwei/runtime/context_hooks.py`
+- `wuwei/memory/context_window.py`
+- `wuwei/runtime/context_hook.py`
 
 先只做：
 
@@ -2057,9 +1917,10 @@ MySQL 只作为 `examples/mysql_history_store.py` 或 `integrations/mysql`。
 
 新增：
 
+- `wuwei/memory/context_compressor.py`；
 - `ContextCompressor` 协议；
 - `LLMContextCompressor`；
-- `ContextCompressionHook`；
+- `ContextCompressionHook`，放在 `wuwei/runtime/context_hook.py`；
 - `session.summary`；
 - `history_store.update_summary()`。
 
@@ -2089,7 +1950,7 @@ MySQL 只作为 `examples/mysql_history_store.py` 或 `integrations/mysql`。
 
 ```python
 from wuwei.agent import Agent
-from wuwei.runtime.context_hooks import ContextWindowHook
+from wuwei.runtime.context_hook import ContextWindowHook
 
 agent = Agent.from_env(
     builtin_tools=["time"],
