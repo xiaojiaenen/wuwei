@@ -1,9 +1,11 @@
 import asyncio
+import json
 import time
 from typing import AsyncIterator, TYPE_CHECKING
 
 from wuwei.agent.session import AgentSession
 from wuwei.llm import AgentEvent, AgentRunResult, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.runtime.hitl import ToolApprovalRejected
 from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
 
@@ -102,6 +104,7 @@ class AgentRunner:
         try:
             while step_count < self.session.max_steps:
                 content_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 full_tool_calls = None
                 messages = self._copy_messages()
                 tools = list(self.tools)
@@ -131,13 +134,20 @@ class AgentRunner:
                             data={"content": chunk.content},
                         )
 
+                    if chunk.reasoning_content:
+                        reasoning_parts.append(chunk.reasoning_content)
+
                     self._merge_usage(total_usage, chunk.usage)
 
                     if chunk.tool_calls_complete:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
+                context.add_ai_message(
+                    "".join(content_parts),
+                    tool_calls=full_tool_calls,
+                    reasoning_content="".join(reasoning_parts) or None,
+                )
 
                 if full_tool_calls:
                     for tool_call in full_tool_calls:
@@ -269,10 +279,49 @@ class AgentRunner:
         step: int,
         task: "Task | None" = None,
     ) -> Message:
-        await self.hooks.before_tool(self.session, tool_call, step=step, task=task)
+        try:
+            await self.hooks.before_tool(self.session, tool_call, step=step, task=task)
+        except ToolApprovalRejected as exc:
+            return self._build_tool_error_message(
+                tool_call,
+                error_type=type(exc).__name__,
+                message=str(exc),
+                metadata={
+                    "tool_executed": False,
+                    "instruction": (
+                        "The human rejected this tool call. The tool was not executed. "
+                        "Do not claim the action succeeded; tell the user it was not completed."
+                    ),
+                },
+            )
+
         tool_message = await self.tool_executor.execute_one(tool_call)
         await self.hooks.after_tool(self.session, tool_call, tool_message, step=step, task=task)
         return tool_message
+
+    def _build_tool_error_message(
+        self,
+        tool_call: ToolCall,
+        *,
+        error_type: str,
+        message: str,
+        metadata: dict | None = None,
+    ) -> Message:
+        payload = {
+            "ok": False,
+            "error": {
+                "type": error_type,
+                "message": message,
+            },
+        }
+        if metadata:
+            payload.update(metadata)
+
+        return Message(
+            role="tool",
+            tool_call_id=tool_call.id,
+            content=json.dumps(payload, ensure_ascii=False),
+        )
 
     async def _execute_tool_calls(
         self,
@@ -336,6 +385,7 @@ class AgentRunner:
                 context.add_ai_message(
                     response.message.content,
                     response.message.tool_calls,
+                    reasoning_content=response.message.reasoning_content,
                 )
 
                 if response.finish_reason == "tool_calls" and response.message.tool_calls:
@@ -388,6 +438,7 @@ class AgentRunner:
         try:
             while step_count < self.session.max_steps:
                 content_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 full_tool_calls = None
                 messages = self._copy_messages()
                 tools = list(self.tools)
@@ -412,13 +463,20 @@ class AgentRunner:
                         content_parts.append(chunk.content)
                         yield chunk
 
+                    if chunk.reasoning_content:
+                        reasoning_parts.append(chunk.reasoning_content)
+
                     self._merge_usage(total_usage, chunk.usage)
 
                     if chunk.tool_calls_complete:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                context.add_ai_message("".join(content_parts), tool_calls=full_tool_calls)
+                context.add_ai_message(
+                    "".join(content_parts),
+                    tool_calls=full_tool_calls,
+                    reasoning_content="".join(reasoning_parts) or None,
+                )
 
                 if full_tool_calls:
                     tool_messages = await self._execute_tool_calls(

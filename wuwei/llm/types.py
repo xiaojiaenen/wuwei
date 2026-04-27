@@ -14,6 +14,7 @@ class ToolCall(BaseModel):
 class Message(BaseModel):
     role:Literal["system", "user", "assistant", "tool"]
     content:str|None=None
+    reasoning_content:str|None=None
     tool_calls:list[ToolCall]|None=None
     tool_call_id:str|None=None
 
@@ -26,6 +27,7 @@ class LLMResponse(BaseModel):
 
 class LLMResponseChunk(BaseModel):
     content: str
+    reasoning_content: str | None = None
     tool_calls_delta: list[dict[str, Any]]|str = None  # 每个元素的格式：{"index": int, "id": str, "name": str, "arguments": str}
     tool_calls_complete: list[ToolCall]|None = None
     finish_reason: Literal["stop", "tool_calls", "length", "content_filter"]|None = None

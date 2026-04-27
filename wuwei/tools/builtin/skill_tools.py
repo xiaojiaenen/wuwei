@@ -46,7 +46,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
                 scripts_dir = Path(skill.path) / "scripts"
                 if scripts_dir.is_dir():
                     scripts = sorted(
-                        str(path.relative_to(Path(skill.path)))
+                        path.relative_to(Path(skill.path)).as_posix()
                         for path in scripts_dir.rglob("*.py")
                     )
 

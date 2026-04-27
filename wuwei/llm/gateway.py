@@ -30,6 +30,8 @@ class LLMGateway:
             }
             if config.get("base_url"):
                 adapter_kwargs["base_url"] = config["base_url"]
+            if config.get("extra_body"):
+                adapter_kwargs["extra_body"] = config["extra_body"]
 
             self.adapter = OpenAIAdapter(**adapter_kwargs)
         else:
@@ -196,6 +198,7 @@ class LLMGateway:
                 continue
 
             content = data.get("content", "")
+            reasoning_content = data.get("reasoning_content", "")
             finish_reason = data.get("finish_reason")
             tool_calls_delta = data.get("tool_calls_delta")
 
@@ -211,7 +214,10 @@ class LLMGateway:
                     if "arguments" in delta_item:
                         pending[idx]["arguments"] += delta_item["arguments"]
 
-            out_chunk = LLMResponseChunk(content=content)
+            out_chunk = LLMResponseChunk(
+                content=content,
+                reasoning_content=reasoning_content or None,
+            )
 
             if finish_reason == "tool_calls":
                 complete: list[ToolCall] = []

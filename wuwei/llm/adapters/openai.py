@@ -18,6 +18,8 @@ class OpenAIAdapter(BaseAdapter):
         openai_messages = []
         for msg in messages:
             m = {"role": msg.role, "content": msg.content}
+            if msg.reasoning_content:
+                m["reasoning_content"] = msg.reasoning_content
             if msg.tool_calls:
                 m["tool_calls"]=[
                     {
@@ -74,6 +76,7 @@ class OpenAIAdapter(BaseAdapter):
         internal_msg = Message(
             role="assistant",
             content=message.content,
+            reasoning_content=self._get_extra_field(message, "reasoning_content"),
             tool_calls=tool_calls,
         )
 
@@ -95,6 +98,7 @@ class OpenAIAdapter(BaseAdapter):
         delta = chunk.choices[0].delta
         result = {
             "content": delta.content or "",
+            "reasoning_content": self._get_extra_field(delta, "reasoning_content") or "",
             "finish_reason": chunk.choices[0].finish_reason,
         }
         if delta.tool_calls:
@@ -109,3 +113,14 @@ class OpenAIAdapter(BaseAdapter):
                     item["arguments"] = tc.function.arguments
                 result["tool_calls_delta"].append(item)
         return result
+
+    def _get_extra_field(self, obj: Any, field_name: str) -> Any:
+        value = getattr(obj, field_name, None)
+        if value is not None:
+            return value
+
+        model_extra = getattr(obj, "model_extra", None)
+        if isinstance(model_extra, dict):
+            return model_extra.get(field_name)
+
+        return None

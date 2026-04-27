@@ -19,9 +19,21 @@ class Context:
         """追加一条工具返回消息。"""
         self._messages.append(Message(role="tool", content=content, tool_call_id=tool_call_id))
 
-    def add_ai_message(self, content: str | None, tool_calls: list[ToolCall] | None = None) -> None:
+    def add_ai_message(
+        self,
+        content: str | None,
+        tool_calls: list[ToolCall] | None = None,
+        reasoning_content: str | None = None,
+    ) -> None:
         """追加一条 assistant 消息。"""
-        self._messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
+        self._messages.append(
+            Message(
+                role="assistant",
+                content=content,
+                reasoning_content=reasoning_content,
+                tool_calls=tool_calls,
+            )
+        )
 
     def get_messages(self) -> list[Message]:
         """返回完整消息历史。"""
