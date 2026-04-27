@@ -14,11 +14,11 @@ class ContextCompressionHook(RuntimeHook):
         compressor: ContextCompressor,
         context_window: SimpleContextWindow | None = None,
         *,
-        compress_after_turns: int = 16,
-        keep_recent_turns: int = 4,
+        compress_after_turns: int = 30,
+        keep_recent_turns: int = 10,
     ) -> None:
         if keep_recent_turns >= compress_after_turns:
-            raise ValueError("keep_recent_turns must be smaller than compress_after_turns")
+            raise ValueError("keep_recent_turns 必须小于 compress_after_turns")
 
         self.compressor = compressor
         self.compress_after_turns = compress_after_turns
