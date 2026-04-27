@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwei"
-version = "0.1.3"
+version = "0.1.4"
 description = "Wuwei - 无为而治的 AI 智能体框架"
 authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
 license = "Apache-2.0"                         # 改为简单字符串（SPDX 表达式）
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "markitdown[all]>=0.1.5",
+    "markitdown[pptx,docx,xlsx,xls,pdf]>=0.1.5",
     "openai>=1.0.0",                           # 最新稳定版是 1.x，2.x 不存在
     "pydantic>=2.0.0",
     "pyyaml>=6.0.3",
