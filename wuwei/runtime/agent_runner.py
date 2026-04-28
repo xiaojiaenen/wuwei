@@ -125,6 +125,15 @@ class AgentRunner:
                 llm_calls += 1
 
                 async for chunk in stream:
+                    if chunk.reasoning_content:
+                        reasoning_parts.append(chunk.reasoning_content)
+                        yield AgentEvent(
+                            type="reasoning_delta",
+                            session_id=self.session.session_id,
+                            step=step_count,
+                            data={"content": chunk.reasoning_content},
+                        )
+
                     if chunk.content:
                         content_parts.append(chunk.content)
                         yield AgentEvent(
@@ -133,9 +142,6 @@ class AgentRunner:
                             step=step_count,
                             data={"content": chunk.content},
                         )
-
-                    if chunk.reasoning_content:
-                        reasoning_parts.append(chunk.reasoning_content)
 
                     self._merge_usage(total_usage, chunk.usage)
 
@@ -471,12 +477,14 @@ class AgentRunner:
                 llm_calls += 1
 
                 async for chunk in stream:
+                    if chunk.reasoning_content:
+                        reasoning_parts.append(chunk.reasoning_content)
+
                     if chunk.content:
                         content_parts.append(chunk.content)
                         yield chunk
-
-                    if chunk.reasoning_content:
-                        reasoning_parts.append(chunk.reasoning_content)
+                    elif chunk.reasoning_content:
+                        yield chunk
 
                     self._merge_usage(total_usage, chunk.usage)
 

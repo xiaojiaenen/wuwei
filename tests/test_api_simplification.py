@@ -109,6 +109,26 @@ class FakeTextStreamLLM:
         return iterator()
 
 
+class FakeReasoningStreamLLM:
+    async def generate(self, messages, tools=None, stream=False, **kwargs):
+        assert stream is True
+
+        async def iterator():
+            yield LLMResponseChunk(content="", reasoning_content="先分析")
+            yield LLMResponseChunk(content="", reasoning_content="再确认")
+            yield LLMResponseChunk(
+                content="最终回答",
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 5,
+                    "completion_tokens": 4,
+                    "total_tokens": 9,
+                },
+            )
+
+        return iterator()
+
+
 class FakeToolStreamLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -257,6 +277,49 @@ async def test_agent_runner_stream_events_yields_text_and_done() -> None:
         "total_tokens": 8,
     }
     assert runner.session.last_llm_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_stream_events_yields_reasoning_delta() -> None:
+    registry = ToolRegistry()
+    runner = AgentRunner(
+        llm=FakeReasoningStreamLLM(),
+        tools=registry.list_tools(),
+        tool_executor=ToolExecutor(registry),
+        session=AgentSession(session_id="session-reasoning"),
+    )
+
+    events = [event async for event in runner.stream_events("你好")]
+
+    assert [event.type for event in events] == [
+        "reasoning_delta",
+        "reasoning_delta",
+        "text_delta",
+        "done",
+    ]
+    assert events[0].data == {"content": "先分析"}
+    assert events[1].data == {"content": "再确认"}
+    assert events[2].data == {"content": "最终回答"}
+    assert runner.session.context.get_last_message().content == "最终回答"
+    assert runner.session.context.get_last_message().reasoning_content == "先分析再确认"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_stream_yields_reasoning_chunks() -> None:
+    registry = ToolRegistry()
+    runner = AgentRunner(
+        llm=FakeReasoningStreamLLM(),
+        tools=registry.list_tools(),
+        tool_executor=ToolExecutor(registry),
+        session=AgentSession(session_id="session-reasoning-stream"),
+    )
+
+    stream = await runner.run("你好", stream=True)
+    chunks = [chunk async for chunk in stream]
+
+    assert [chunk.reasoning_content for chunk in chunks] == ["先分析", "再确认", None]
+    assert [chunk.content for chunk in chunks] == ["", "", "最终回答"]
+    assert runner.session.context.get_last_message().reasoning_content == "先分析再确认"
 
 
 @pytest.mark.asyncio
@@ -437,6 +500,27 @@ async def test_plan_agent_stream_events_adds_task_context() -> None:
     assert events[0].data["task_id"] == 1
     assert events[0].data["root_session_id"] == "plan-session"
     assert events[2].data["task_description"] == "执行: 测试任务"
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_stream_events_preserves_reasoning_delta_context() -> None:
+    agent = PlanAgent(
+        llm=FakeReasoningStreamLLM(),
+        tools=ToolRegistry(),
+        planner=FakePlanner(),
+    )
+
+    events = [event async for event in agent.stream_events("测试任务", session_id="plan-reasoning")]
+
+    assert [event.type for event in events] == [
+        "reasoning_delta",
+        "reasoning_delta",
+        "text_delta",
+        "done",
+    ]
+    assert events[0].data["content"] == "先分析"
+    assert events[0].data["task_id"] == 1
+    assert events[0].data["root_session_id"] == "plan-reasoning"
 
 
 @pytest.mark.asyncio

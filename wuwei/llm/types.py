@@ -35,7 +35,7 @@ class LLMResponseChunk(BaseModel):
 
 
 class AgentEvent(BaseModel):
-    type: Literal["text_delta", "tool_start", "tool_end", "done", "error"]
+    type: Literal["text_delta", "reasoning_delta", "tool_start", "tool_end", "done", "error"]
     session_id: str
     step: int
     data: dict[str, Any] = Field(default_factory=dict)
