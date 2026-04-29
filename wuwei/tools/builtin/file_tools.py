@@ -76,7 +76,7 @@ def _collect_files(
 
 
 def register_file_tools(registry: ToolRegistry) -> None:
-    @registry.tool(name="file_to_md", description="将文件转换为 markdown供大模型阅读，支持常见文本文件、csv、pdf、xlsx、docx 等。")
+    @registry.tool(name="file_to_md", description="将文件转换为 markdown供大模型阅读，支持常见文本文件、pptx,docx,xlsx,xls,pdf 等。")
     def file_to_md(path: str):
         try:
             md_converter = MarkItDown()
