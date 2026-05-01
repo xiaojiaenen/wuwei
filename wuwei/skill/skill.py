@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -8,6 +8,8 @@ class Skill:
     description: str
     instruction: str
     path: str | None = None
+    scripts: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
 
 
 class SkillProvider(Protocol):
@@ -31,6 +33,14 @@ class SkillManager:
         for provider in self.skill_providers:
             for meta in provider.list_skills():
                 self._meta_index[meta.name] = (provider, meta)
+
+    def refresh(self) -> None:
+        """刷新所有 provider 的索引。"""
+        for provider in self.skill_providers:
+            refresh = getattr(provider, "refresh", None)
+            if callable(refresh):
+                refresh()
+        self._rebuild_index()
 
     def list_skills(self) -> list[Skill]:
         """列出所有可用的技能。"""

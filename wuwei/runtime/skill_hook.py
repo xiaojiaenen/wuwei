@@ -19,6 +19,8 @@ DEFAULT_SKILL_INSTRUCTION = (
     "不要为了例行检查而在每轮都调用 `list_skills`。"
     "只有当某个 skill 的描述与当前任务明确匹配时，才调用 `load_skill` 加载正文；"
     "如果没有清晰匹配的 skill，就继续用普通方式完成任务。"
+    "如果已加载 skill 声明了 references，只有当正文要求或任务确实需要补充细节时，"
+    "才调用 `load_skill_reference` 按需读取单个参考文件。"
     "只有在已加载的 skill 正文明确要求时，"
     "才调用 `run_skill_python_script` 执行该 skill 自带的 Python 脚本。"
     "调用脚本时，必须传入 `load_skill` 返回的 `load_token`。"

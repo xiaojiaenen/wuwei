@@ -11,6 +11,7 @@ from wuwei.tools.registry import ToolRegistry
 
 SKILL_SCRIPT_TIMEOUT_SECONDS = 10
 SKILL_SCRIPT_OUTPUT_LIMIT = 4000
+SKILL_REFERENCE_READ_LIMIT = 20_000
 
 
 def _normalize_text(value: str | bytes | None) -> str:
@@ -31,8 +32,35 @@ def _truncate_output(value: str | bytes | None, *, limit: int | None = None) -> 
     return f"{text[:limit]}\n... [truncated {omitted} chars]"
 
 
+def _truncate_text(text: str, *, limit: int) -> tuple[str, bool]:
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
 def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) -> None:
     loaded_skill_tokens: dict[str, str] = {}
+
+    def _assert_loaded(skill_name: str, load_token: str) -> None:
+        if loaded_skill_tokens.get(load_token) != skill_name:
+            raise ValueError(
+                "使用 skill 附属资源前必须先调用 load_skill，并使用 load_skill 返回的 load_token。"
+            )
+
+    def _resolve_skill_file(skill_path: str, relative_path: str, required_dir: str) -> Path:
+        root_dir = Path(skill_path).resolve()
+        target_path = (root_dir / relative_path).resolve()
+
+        if target_path == root_dir or root_dir not in target_path.parents:
+            raise ValueError("文件路径必须位于 skill 目录内")
+        if not target_path.is_file():
+            raise ValueError(f"文件不存在: {relative_path}")
+
+        resolved_relative = target_path.relative_to(root_dir)
+        if not resolved_relative.parts or resolved_relative.parts[0] != required_dir:
+            raise ValueError(f"当前仅允许访问 skill 目录下 {required_dir}/ 中的文件")
+
+        return target_path
 
     @registry.tool(
         name="list_skills",
@@ -41,21 +69,14 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
     def list_skills() -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
         for skill in skill_manager.list_skills():
-            scripts: list[str] = []
-            if skill.path is not None:
-                scripts_dir = Path(skill.path) / "scripts"
-                if scripts_dir.is_dir():
-                    scripts = sorted(
-                        path.relative_to(Path(skill.path)).as_posix()
-                        for path in scripts_dir.rglob("*.py")
-                    )
-
             items.append(
                 {
                     "name": skill.name,
                     "description": skill.description,
-                    "has_python_scripts": bool(scripts),
-                    "python_scripts": scripts,
+                    "has_python_scripts": bool(skill.scripts),
+                    "python_scripts": skill.scripts,
+                    "has_references": bool(skill.references),
+                    "references": skill.references,
                 }
             )
         return items
@@ -64,7 +85,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
         name="load_skill",
         description="根据技能名称加载技能正文。选中 skill 后再调用这个工具。",
     )
-    def load_skill(skill_name: str) -> dict[str, str]:
+    def load_skill(skill_name: str) -> dict[str, object]:
         skill = skill_manager.get_skill(skill_name)
         instruction = skill_manager.load_skill_instruction(skill_name)
         if not instruction:
@@ -77,6 +98,40 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             "description": skill.description,
             "instruction": instruction,
             "load_token": load_token,
+            "python_scripts": skill.scripts,
+            "references": skill.references,
+        }
+
+    @registry.tool(
+        name="load_skill_reference",
+        description=(
+            "读取已加载 skill 的 references/ 目录中的单个参考文件。"
+            "必须传入 load_skill 返回的 load_token；只在 skill 正文要求阅读参考资料时使用。"
+        ),
+    )
+    def load_skill_reference(
+        skill_name: str,
+        reference_path: str,
+        load_token: str,
+        max_chars: int = SKILL_REFERENCE_READ_LIMIT,
+    ) -> dict[str, object]:
+        skill = skill_manager.get_skill(skill_name)
+        if not skill.path:
+            raise ValueError(f"Skill '{skill_name}' 没有关联目录")
+        _assert_loaded(skill.name, load_token)
+        if reference_path not in skill.references:
+            raise ValueError(f"Skill '{skill_name}' 没有这个 reference: {reference_path}")
+
+        target_path = _resolve_skill_file(skill.path, reference_path, "references")
+        text = target_path.read_text(encoding="utf-8", errors="replace")
+        content, truncated = _truncate_text(text, limit=max_chars)
+        return {
+            "ok": True,
+            "skill_name": skill.name,
+            "reference_path": reference_path,
+            "content": content,
+            "truncated": truncated,
+            "size_chars": len(text),
         }
 
     @registry.tool(
@@ -100,20 +155,12 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             raise ValueError(
                 "运行 skill 脚本前必须先调用 load_skill，并使用 load_skill 返回的 load_token。"
             )
+        if script_path not in skill.scripts:
+            raise ValueError(f"Skill '{skill_name}' 没有这个脚本: {script_path}")
 
-        root_dir = Path(skill.path).resolve()
-        target_path = (root_dir / script_path).resolve()
-
-        if root_dir not in target_path.parents:
-            raise ValueError("脚本路径必须位于 skill 目录内")
-        if not target_path.is_file():
-            raise ValueError(f"脚本不存在: {script_path}")
+        target_path = _resolve_skill_file(skill.path, script_path, "scripts")
         if target_path.suffix != ".py":
             raise ValueError("当前仅允许执行 Python 脚本")
-
-        relative_path = target_path.relative_to(root_dir)
-        if not relative_path.parts or relative_path.parts[0] != "scripts":
-            raise ValueError("当前仅允许执行 skill 目录下 scripts/ 中的脚本")
 
         try:
             args = json.loads(args_json)
@@ -127,7 +174,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
         try:
             result = subprocess.run(
                 command,
-                cwd=str(root_dir),
+                cwd=str(Path(skill.path).resolve()),
                 capture_output=True,
                 text=True,
                 timeout=SKILL_SCRIPT_TIMEOUT_SECONDS,

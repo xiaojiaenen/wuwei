@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwei"
-version = "0.1.9"
+version = "0.2.0"
 description = "Wuwei - 无为而治的 AI 智能体框架"
 authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
 license = "Apache-2.0"                         # 改为简单字符串（SPDX 表达式）

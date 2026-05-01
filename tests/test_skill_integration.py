@@ -41,6 +41,9 @@ async def test_skill_tools_list_load_and_run_python_script(tmp_path) -> None:
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir()
     script_file = scripts_dir / "echo.py"
+    references_dir = skill_dir / "references"
+    references_dir.mkdir()
+    reference_file = references_dir / "weather.md"
 
     skill_file.write_text(
         "---\n"
@@ -57,6 +60,7 @@ async def test_skill_tools_list_load_and_run_python_script(tmp_path) -> None:
         "print(json.dumps({'args': sys.argv[1:]}, ensure_ascii=False))\n",
         encoding="utf-8",
     )
+    reference_file.write_text("天气分析参考资料\n第二行", encoding="utf-8")
 
     provider = FileSystemSkillProvider(str(tmp_path))
     manager = SkillManager([provider])
@@ -65,6 +69,14 @@ async def test_skill_tools_list_load_and_run_python_script(tmp_path) -> None:
 
     list_result = await registry.get("list_skills").invoke({})
     load_result = await registry.get("load_skill").invoke({"skill_name": "weather_analyst"})
+    reference_result = await registry.get("load_skill_reference").invoke(
+        {
+            "skill_name": "weather_analyst",
+            "reference_path": "references/weather.md",
+            "load_token": load_result["load_token"],
+            "max_chars": 6,
+        }
+    )
     run_result = await registry.get("run_skill_python_script").invoke(
         {
             "skill_name": "weather_analyst",
@@ -78,10 +90,18 @@ async def test_skill_tools_list_load_and_run_python_script(tmp_path) -> None:
     assert list_result[0]["name"] == "weather_analyst"
     assert list_result[0]["has_python_scripts"] is True
     assert list_result[0]["python_scripts"] == ["scripts/echo.py"]
+    assert list_result[0]["has_references"] is True
+    assert list_result[0]["references"] == ["references/weather.md"]
     assert load_result["name"] == "weather_analyst"
     assert load_result["instruction"] == "优先调用天气工具，并输出城市、天气、温度。"
+    assert load_result["python_scripts"] == ["scripts/echo.py"]
+    assert load_result["references"] == ["references/weather.md"]
     assert isinstance(load_result["load_token"], str)
     assert load_result["load_token"]
+    assert reference_result["ok"] is True
+    assert reference_result["content"] == "天气分析参考"
+    assert reference_result["truncated"] is True
+    assert reference_result["size_chars"] == len("天气分析参考资料\n第二行")
     assert run_result["ok"] is True
     assert run_result["returncode"] == 0
     assert json.loads(run_result["stdout"]) == {"args": ["北京", "晴"]}
@@ -182,6 +202,10 @@ def test_skill_manager_raises_clear_error_for_missing_skill() -> None:
 def test_filesystem_skill_provider_loads_skill_instruction_and_path(tmp_path) -> None:
     skill_dir = tmp_path / "weather"
     skill_dir.mkdir()
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    references_dir = skill_dir / "references"
+    references_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(
         "---\n"
@@ -191,6 +215,8 @@ def test_filesystem_skill_provider_loads_skill_instruction_and_path(tmp_path) ->
         "优先调用天气工具，并输出城市、天气、温度。\n",
         encoding="utf-8",
     )
+    (scripts_dir / "echo.py").write_text("print('ok')\n", encoding="utf-8")
+    (references_dir / "guide.md").write_text("参考资料\n", encoding="utf-8")
 
     provider = FileSystemSkillProvider(str(tmp_path))
     skills = provider.list_skills()
@@ -198,7 +224,34 @@ def test_filesystem_skill_provider_loads_skill_instruction_and_path(tmp_path) ->
     assert len(skills) == 1
     assert skills[0].name == "weather_analyst"
     assert skills[0].path == str(skill_dir)
+    assert skills[0].scripts == ["scripts/echo.py"]
+    assert skills[0].references == ["references/guide.md"]
     assert provider.load_skill_instruction("weather_analyst") == (
         "优先调用天气工具，并输出城市、天气、温度。"
     )
     assert provider.load_skill_instruction("missing") is None
+
+
+def test_filesystem_skill_provider_uses_cache_until_refresh(tmp_path) -> None:
+    first_skill_dir = tmp_path / "first"
+    first_skill_dir.mkdir()
+    (first_skill_dir / "SKILL.md").write_text(
+        "---\n" "name: first_skill\n" "description: 第一个技能\n" "---\n\n" "第一个技能正文。\n",
+        encoding="utf-8",
+    )
+
+    provider = FileSystemSkillProvider(str(tmp_path))
+    assert [skill.name for skill in provider.list_skills()] == ["first_skill"]
+
+    second_skill_dir = tmp_path / "second"
+    second_skill_dir.mkdir()
+    (second_skill_dir / "SKILL.md").write_text(
+        "---\n" "name: second_skill\n" "description: 第二个技能\n" "---\n\n" "第二个技能正文。\n",
+        encoding="utf-8",
+    )
+
+    assert [skill.name for skill in provider.list_skills()] == ["first_skill"]
+
+    provider.refresh()
+
+    assert [skill.name for skill in provider.list_skills()] == ["first_skill", "second_skill"]
