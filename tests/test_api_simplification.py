@@ -1,15 +1,26 @@
+import asyncio
+
 import pytest
 
 import wuwei.agent.agent as agent_module
 import wuwei.agent.plan_agent as plan_agent_module
 from wuwei.agent import Agent, AgentSession, PlanAgent
-from wuwei.llm import AgentRunResult, FunctionCall, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.llm import (
+    AgentEvent,
+    AgentRunResult,
+    FunctionCall,
+    LLMResponse,
+    LLMResponseChunk,
+    Message,
+    ToolCall,
+)
 from wuwei.memory.storage import FileStorage
 from wuwei.planning import PlanRunResult, Task
 from wuwei.runtime.agent_runner import AgentRunner
-from wuwei.runtime.hooks import HookManager
+from wuwei.runtime.hitl import ApprovalPolicy
+from wuwei.runtime.hooks import HookManager, RuntimeHook
 from wuwei.runtime.storage_hook import StorageHook
-from wuwei.tools import Tool, ToolExecutor, ToolParameters, ToolRegistry
+from wuwei.tools import Tool, ToolExecutor, ToolParameters, ToolRegistry, ToolRetryPolicy
 
 
 def test_tool_registry_from_builtin_registers_time_tools() -> None:
@@ -39,6 +50,94 @@ def test_tool_registry_register_callable_registers_function() -> None:
     assert registry.get("get_weather") == tool
     assert tool.parameters.required == ["city"]
     assert tool.parameters.properties["city"]["type"] == "string"
+
+
+def test_tool_registry_register_callable_accepts_execution_policy() -> None:
+    registry = ToolRegistry()
+
+    def save_note(content: str) -> dict:
+        return {"content": content}
+
+    tool = registry.register_callable(
+        save_note,
+        timeout_seconds=2,
+        side_effect=True,
+        requires_approval=True,
+        retry_policy=ToolRetryPolicy(max_attempts=3, backoff_seconds=0),
+    )
+
+    assert tool.execution.timeout_seconds == 2
+    assert tool.execution.side_effect is True
+    assert tool.execution.requires_approval is True
+    assert tool.execution.retry_policy.max_attempts == 3
+
+
+def test_approval_policy_uses_tool_requires_approval_metadata() -> None:
+    registry = ToolRegistry()
+
+    @registry.tool(description="保存笔记", requires_approval=True)
+    def save_note(content: str) -> dict:
+        return {"content": content}
+
+    tool = registry.get("save_note")
+    tool_call = ToolCall(
+        id="call-approval",
+        type="function",
+        function=FunctionCall(name="save_note", arguments={"content": "hello"}),
+    )
+
+    assert tool is not None
+    assert ApprovalPolicy().requires_tool_approval(
+        tool_call,
+        session=AgentSession(session_id="approval-session"),
+        tool=tool,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_applies_timeout_and_retry_policy() -> None:
+    registry = ToolRegistry()
+    attempts = 0
+
+    @registry.tool(
+        description="不稳定工具",
+        timeout_seconds=1,
+        retry_policy=ToolRetryPolicy(max_attempts=2, backoff_seconds=0),
+    )
+    async def flaky_tool() -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ValueError("temporary failure")
+        return {"ok": True, "attempts": attempts}
+
+    message = await ToolExecutor(registry).execute_one(
+        ToolCall(
+            id="call-retry",
+            type="function",
+            function=FunctionCall(name="flaky_tool", arguments={}),
+        )
+    )
+
+    assert attempts == 2
+    assert message.content is not None
+    assert "temporary failure" not in message.content
+    assert "attempts" in message.content
+
+    @registry.tool(description="慢工具", timeout_seconds=0.01)
+    async def slow_tool() -> dict:
+        await asyncio.sleep(1)
+        return {"ok": True}
+
+    timeout_message = await ToolExecutor(registry).execute_one(
+        ToolCall(
+            id="call-timeout",
+            type="function",
+            function=FunctionCall(name="slow_tool", arguments={}),
+        )
+    )
+    assert timeout_message.content is not None
+    assert "ToolTimeout" in timeout_message.content
 
 
 def test_agent_from_env_builds_agent_with_builtin_and_callable_tools(monkeypatch) -> None:
@@ -249,6 +348,26 @@ class FakePlanner:
         ]
 
 
+class EventCaptureHook(RuntimeHook):
+    def __init__(self) -> None:
+        self.events: list[AgentEvent] = []
+
+    async def on_event(self, event: AgentEvent) -> None:
+        self.events.append(event)
+
+
+class LegacyToolHook(RuntimeHook):
+    def __init__(self) -> None:
+        self.before_tool_called = False
+        self.after_tool_called = False
+
+    async def before_tool(self, session, tool_call, *, step: int, task=None) -> None:
+        self.before_tool_called = True
+
+    async def after_tool(self, session, tool_call, tool_message, *, step: int, task=None) -> None:
+        self.after_tool_called = True
+
+
 @pytest.mark.asyncio
 async def test_agent_runner_stream_events_yields_text_and_done() -> None:
     registry = ToolRegistry()
@@ -340,7 +459,9 @@ async def test_storage_hook_persists_streaming_assistant_message(tmp_path) -> No
 
     assert [event.type for event in events] == ["text_delta", "text_delta", "done"]
     assert stored_session is not None
-    assert [(message.role, message.content) for message in stored_session.context.get_messages()] == [
+    assert [
+        (message.role, message.content) for message in stored_session.context.get_messages()
+    ] == [
         ("system", "你是一个有用的助手"),
         ("user", "你好"),
         ("assistant", "你好世界"),
@@ -454,6 +575,65 @@ async def test_agent_run_aggregates_usage_across_tool_rounds() -> None:
     assert runner.session.last_usage == result.usage
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_emits_unified_runtime_events() -> None:
+    registry = ToolRegistry()
+
+    @registry.tool(description="查询天气")
+    async def get_weather(city: str) -> dict:
+        return {"city": city, "condition": "sunny"}
+
+    capture = EventCaptureHook()
+    runner = AgentRunner(
+        llm=FakeToolLLM(),
+        tools=registry.list_tools(),
+        tool_executor=ToolExecutor(registry),
+        session=AgentSession(session_id="session-events"),
+        hooks=HookManager([capture]),
+    )
+
+    result = await runner.run("北京天气", stream=False)
+    event_types = [event.type for event in capture.events]
+
+    assert result.content == "最终回答"
+    assert event_types == [
+        "run_start",
+        "llm_start",
+        "llm_end",
+        "tool_start",
+        "tool_end",
+        "llm_start",
+        "llm_end",
+        "run_end",
+    ]
+    assert {event.run_id for event in capture.events} - {None}
+    assert capture.events[3].data["tool_name"] == "get_weather"
+    assert capture.events[4].data["tool_call_id"] == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_hook_manager_keeps_legacy_tool_hook_signature_compatible() -> None:
+    registry = ToolRegistry()
+
+    @registry.tool(description="查询天气")
+    async def get_weather(city: str) -> dict:
+        return {"city": city, "condition": "sunny"}
+
+    legacy_hook = LegacyToolHook()
+    runner = AgentRunner(
+        llm=FakeToolLLM(),
+        tools=registry.list_tools(),
+        tool_executor=ToolExecutor(registry),
+        session=AgentSession(session_id="session-legacy-hook"),
+        hooks=HookManager([legacy_hook]),
+    )
+
+    await runner.run("北京天气", stream=False)
+
+    assert legacy_hook.before_tool_called is True
+    assert legacy_hook.after_tool_called is True
+
+
 def test_plan_agent_from_env_builds_agent(monkeypatch) -> None:
     dummy_llm = object()
 
@@ -557,3 +737,22 @@ async def test_plan_agent_run_returns_aggregated_plan_result() -> None:
     assert result.planner_llm_calls == 1
     assert result.execution_llm_calls == 1
     assert result.llm_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_emits_task_runtime_events() -> None:
+    capture = EventCaptureHook()
+    agent = PlanAgent(
+        llm=FakeTextLLM(),
+        tools=ToolRegistry(),
+        planner=FakePlanner(),
+        hooks=HookManager([capture]),
+    )
+
+    result = await agent.run("测试任务", session=agent.create_session(session_id="plan-events"))
+    task_events = [event for event in capture.events if event.type in {"task_start", "task_end"}]
+
+    assert isinstance(result, PlanRunResult)
+    assert [event.type for event in task_events] == ["task_start", "task_end"]
+    assert task_events[0].data["task_id"] == 1
+    assert task_events[1].data["status"] == "completed"

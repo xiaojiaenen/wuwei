@@ -138,7 +138,11 @@ def register_npm_tools(registry: ToolRegistry) -> None:
 
     @registry.tool(
         name="npm_install_package",
-        description="安装 npm 包。会修改 package.json/package-lock.json，通常应配合 HITL 审批使用。",
+        description=(
+            "安装 npm 包。会修改 package.json/package-lock.json，通常应配合 HITL 审批使用。"
+        ),
+        side_effect=True,
+        requires_approval=True,
     )
     def npm_install_package(
         package: str,

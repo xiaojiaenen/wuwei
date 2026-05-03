@@ -45,6 +45,9 @@ def register_python_tools(registry: ToolRegistry) -> None:
             "执行 workspace 内的 Python 脚本。脚本路径必须位于 workspace 内，"
             "支持 JSON 数组形式的命令行参数、超时和输出截断。"
         ),
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS + 1,
+        side_effect=True,
+        requires_approval=True,
     )
     def run_python_script(
         script_path: str,

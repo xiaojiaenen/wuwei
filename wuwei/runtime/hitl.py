@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from wuwei.llm import ToolCall
+from wuwei.tools import Tool
 
 ApprovalStatus = Literal["approved", "rejected", "pending"]
 
@@ -37,8 +38,7 @@ class ApprovalProvider(Protocol):
     database workflow, or any other approval mechanism.
     """
 
-    async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
-        ...
+    async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision: ...
 
 
 class ApprovalPolicy:
@@ -53,19 +53,26 @@ class ApprovalPolicy:
         self.require_approval_tools = require_approval_tools or set()
         self.auto_approve_tools = auto_approve_tools or set()
 
-    def requires_tool_approval(self, tool_call: ToolCall, *, session, task=None) -> bool:
+    def requires_tool_approval(
+        self,
+        tool_call: ToolCall,
+        *,
+        session,
+        task=None,
+        tool: Tool | None = None,
+    ) -> bool:
         tool_name = tool_call.function.name
 
         if tool_name in self.auto_approve_tools:
             return False
 
-        if tool_name in self.require_approval_tools:
+        if tool is not None and tool.execution.requires_approval:
             return True
 
-        return False
+        return tool_name in self.require_approval_tools
 
 
-class ToolApprovalRejected(Exception):
+class ToolApprovalRejected(Exception):  # noqa: N818
     """Raised when a human rejects a tool call."""
 
 

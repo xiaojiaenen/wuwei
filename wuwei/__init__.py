@@ -1,6 +1,7 @@
 from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent, PlanAgent
 from wuwei.llm import (
     AgentEvent,
+    AgentEventType,
     AgentRunResult,
     FunctionCall,
     LLMGateway,
@@ -10,7 +11,7 @@ from wuwei.llm import (
     ToolCall,
 )
 from wuwei.memory import Context, FileStorage, Storage
-from wuwei.planning import PlanRunResult, Planner, Task, TaskList
+from wuwei.planning import Planner, PlanRunResult, Task, TaskList
 from wuwei.runtime import (
     AgentRunner,
     ConsoleHook,
@@ -22,7 +23,14 @@ from wuwei.runtime import (
 )
 from wuwei.skill.fs_provider import FileSystemSkillProvider
 from wuwei.skill.skill import Skill, SkillManager, SkillProvider
-from wuwei.tools import Tool, ToolExecutor, ToolParameters, ToolRegistry
+from wuwei.tools import (
+    Tool,
+    ToolExecutionPolicy,
+    ToolExecutor,
+    ToolParameters,
+    ToolRegistry,
+    ToolRetryPolicy,
+)
 
 __all__ = [
     "Agent",
@@ -34,6 +42,7 @@ __all__ = [
     "ConsoleHook",
     "ContextCompressionHook",
     "AgentEvent",
+    "AgentEventType",
     "AgentRunResult",
     "FileStorage",
     "FunctionCall",
@@ -57,7 +66,9 @@ __all__ = [
     "TaskList",
     "Tool",
     "ToolCall",
+    "ToolExecutionPolicy",
     "ToolExecutor",
     "ToolParameters",
+    "ToolRetryPolicy",
     "ToolRegistry",
 ]

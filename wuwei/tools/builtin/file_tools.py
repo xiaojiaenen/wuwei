@@ -20,6 +20,7 @@ def _truncate_text(text: str, *, max_chars: int = DEFAULT_READ_LIMIT) -> tuple[s
         return text, False
     return text[:max_chars], True
 
+
 def _collect_files(
     root: Path,
     max_depth: int,
@@ -46,11 +47,13 @@ def _collect_files(
 
         rel_path = str(item.relative_to(workspace_root))
         if item.is_dir():
-            entries.append({
-                "path": rel_path,
-                "type": "dir",
-                "size_bytes": 0,
-            })
+            entries.append(
+                {
+                    "path": rel_path,
+                    "type": "dir",
+                    "size_bytes": 0,
+                }
+            )
             if max_depth > 0:
                 sub_entries, truncated = _collect_files(
                     item,
@@ -66,17 +69,24 @@ def _collect_files(
                 size = item.stat().st_size
             except OSError:
                 size = 0
-            entries.append({
-                "path": rel_path,
-                "type": "file",
-                "size_bytes": size,
-            })
+            entries.append(
+                {
+                    "path": rel_path,
+                    "type": "file",
+                    "size_bytes": size,
+                }
+            )
 
     return entries, False
 
 
 def register_file_tools(registry: ToolRegistry) -> None:
-    @registry.tool(name="file_to_md", description="将文件转换为 markdown供大模型阅读，支持常见文本文件、pptx,docx,xlsx,xls,pdf 等。")
+    @registry.tool(
+        name="file_to_md",
+        description=(
+            "将文件转换为 markdown供大模型阅读，支持常见文本文件、pptx,docx,xlsx,xls,pdf 等。"
+        ),
+    )
     def file_to_md(path: str):
         try:
             md_converter = MarkItDown()
@@ -91,7 +101,9 @@ def register_file_tools(registry: ToolRegistry) -> None:
         name="read_text_file",
         description="读取 workspace 内的文本文件内容。默认最多返回 20000 字符。",
     )
-    def read_text_file(path: str, max_chars: int = DEFAULT_READ_LIMIT, workspace: str = ".") -> dict:
+    def read_text_file(
+        path: str, max_chars: int = DEFAULT_READ_LIMIT, workspace: str = "."
+    ) -> dict:
         """读取文本文件。
 
         :param path: 相对 workspace 的文件路径
@@ -115,6 +127,8 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="write_text_file",
         description="写入 workspace 内的文本文件。默认不覆盖已有文件，overwrite=true 时才覆盖。",
+        side_effect=True,
+        requires_approval=True,
     )
     def write_text_file(
         path: str,
@@ -142,6 +156,8 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="append_text_file",
         description="向 workspace 内的文本文件末尾追加内容，文件不存在时会创建。",
+        side_effect=True,
+        requires_approval=True,
     )
     def append_text_file(path: str, content: str, workspace: str = ".") -> dict:
         """追加文本文件。
@@ -162,6 +178,8 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="replace_text_in_file",
         description="修改 workspace 内文本文件：把 old_text 替换为 new_text。",
+        side_effect=True,
+        requires_approval=True,
     )
     def replace_text_in_file(
         path: str,
@@ -202,6 +220,8 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="delete_file",
         description="删除 workspace 内的单个文件。只删除文件，不删除目录。",
+        side_effect=True,
+        requires_approval=True,
     )
     def delete_file(path: str, workspace: str = ".") -> dict:
         """删除文件。
@@ -217,11 +237,6 @@ def register_file_tools(registry: ToolRegistry) -> None:
 
         target.unlink()
         return {"ok": True, "path": str(target), "deleted": True}
-
-
-
-
-
 
     @registry.tool(
         name="list_files",

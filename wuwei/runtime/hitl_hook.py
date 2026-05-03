@@ -23,8 +23,21 @@ class HitlHook(RuntimeHook):
         self.provider = provider
         self.policy = policy or ApprovalPolicy()
 
-    async def before_tool(self, session, tool_call: ToolCall, *, step: int, task=None) -> None:
-        if not self.policy.requires_tool_approval(tool_call, session=session, task=task):
+    async def before_tool(
+        self,
+        session,
+        tool_call: ToolCall,
+        *,
+        step: int,
+        task=None,
+        tool=None,
+    ) -> None:
+        if not self.policy.requires_tool_approval(
+            tool_call,
+            session=session,
+            task=task,
+            tool=tool,
+        ):
             return
 
         request = ApprovalRequest(

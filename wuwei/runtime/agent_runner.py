@@ -1,10 +1,20 @@
 import asyncio
 import json
 import time
-from typing import AsyncIterator, TYPE_CHECKING
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from wuwei.agent.session import AgentSession
-from wuwei.llm import AgentEvent, AgentRunResult, LLMGateway, LLMResponse, LLMResponseChunk, Message, ToolCall
+from wuwei.llm import (
+    AgentEvent,
+    AgentRunResult,
+    LLMGateway,
+    LLMResponse,
+    LLMResponseChunk,
+    Message,
+    ToolCall,
+)
 from wuwei.runtime.hitl import ToolApprovalRejected
 from wuwei.runtime.hooks import HookManager
 from wuwei.tools import Tool, ToolExecutor
@@ -87,6 +97,34 @@ class AgentRunner:
             llm_calls=llm_calls,
         )
 
+    def _build_event(
+        self,
+        event_type: str,
+        *,
+        step: int,
+        run_id: str | None = None,
+        data: dict | None = None,
+    ) -> AgentEvent:
+        return AgentEvent(
+            type=event_type,
+            session_id=self.session.session_id,
+            step=step,
+            run_id=run_id,
+            data=data or {},
+        )
+
+    async def _emit_event(
+        self,
+        event_type: str,
+        *,
+        step: int,
+        run_id: str | None = None,
+        data: dict | None = None,
+    ) -> AgentEvent:
+        event = self._build_event(event_type, step=step, run_id=run_id, data=data)
+        await self.hooks.emit_event(event)
+        return event
+
     async def stream_events(
         self,
         user_input: str,
@@ -98,8 +136,10 @@ class AgentRunner:
         llm_calls = 0
         total_latency_ms = 0
         total_usage = self._empty_usage()
+        run_id = uuid4().hex
         context = self.session.context
         context.add_user_message(user_input)
+        await self._emit_event("run_start", step=0, run_id=run_id, data={"input": user_input})
 
         try:
             while step_count < self.session.max_steps:
@@ -117,6 +157,12 @@ class AgentRunner:
                 )
 
                 llm_start = time.monotonic()
+                await self._emit_event(
+                    "llm_start",
+                    step=step_count,
+                    run_id=run_id,
+                    data={"tools": [tool.name for tool in tools]},
+                )
                 stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
                     messages,
                     tools=tools,
@@ -127,21 +173,23 @@ class AgentRunner:
                 async for chunk in stream:
                     if chunk.reasoning_content:
                         reasoning_parts.append(chunk.reasoning_content)
-                        yield AgentEvent(
-                            type="reasoning_delta",
-                            session_id=self.session.session_id,
+                        event = await self._emit_event(
+                            "reasoning_delta",
                             step=step_count,
+                            run_id=run_id,
                             data={"content": chunk.reasoning_content},
                         )
+                        yield event
 
                     if chunk.content:
                         content_parts.append(chunk.content)
-                        yield AgentEvent(
-                            type="text_delta",
-                            session_id=self.session.session_id,
+                        event = await self._emit_event(
+                            "text_delta",
                             step=step_count,
+                            run_id=run_id,
                             data={"content": chunk.content},
                         )
+                        yield event
 
                     self._merge_usage(total_usage, chunk.usage)
 
@@ -149,6 +197,16 @@ class AgentRunner:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
+                await self._emit_event(
+                    "llm_end",
+                    step=step_count,
+                    run_id=run_id,
+                    data={
+                        "latency_ms": total_latency_ms,
+                        "usage": dict(total_usage),
+                        "has_tool_calls": bool(full_tool_calls),
+                    },
+                )
                 ai_message = context.add_ai_message(
                     "".join(content_parts),
                     tool_calls=full_tool_calls,
@@ -163,61 +221,75 @@ class AgentRunner:
 
                 if full_tool_calls:
                     for tool_call in full_tool_calls:
-                        yield AgentEvent(
-                            type="tool_start",
-                            session_id=self.session.session_id,
+                        event = self._build_event(
+                            "tool_start",
                             step=step_count,
+                            run_id=run_id,
                             data={
                                 "tool_name": tool_call.function.name,
                                 "args": tool_call.function.arguments,
                                 "tool_call_id": tool_call.id,
                             },
                         )
+                        yield event
 
                     tool_messages = await self._execute_tool_calls(
                         full_tool_calls,
                         step=step_count,
                         task=task,
+                        run_id=run_id,
                     )
                     self._append_tool_messages(tool_messages)
 
-                    for tool_call, tool_message in zip(full_tool_calls, tool_messages):
-                        yield AgentEvent(
-                            type="tool_end",
-                            session_id=self.session.session_id,
+                    for tool_call, tool_message in zip(
+                        full_tool_calls,
+                        tool_messages,
+                        strict=False,
+                    ):
+                        event = self._build_event(
+                            "tool_end",
                             step=step_count,
+                            run_id=run_id,
                             data={
                                 "tool_name": tool_call.function.name,
                                 "tool_call_id": tool_call.id,
                                 "output": tool_message.content,
                             },
                         )
+                        yield event
 
-                        error_message = self.tool_executor.extract_error_message(tool_message.content)
+                        error_message = self.tool_executor.extract_error_message(
+                            tool_message.content
+                        )
                         if error_message:
-                            yield AgentEvent(
-                                type="error",
-                                session_id=self.session.session_id,
+                            event = self._build_event(
+                                "error",
                                 step=step_count,
+                                run_id=run_id,
                                 data={
                                     "message": error_message,
                                     "tool_name": tool_call.function.name,
                                     "tool_call_id": tool_call.id,
                                 },
                             )
+                            yield event
 
                     step_count += 1
                     continue
 
-                yield AgentEvent(
-                    type="done",
-                    session_id=self.session.session_id,
+                done_event = await self._emit_event(
+                    "done",
                     step=step_count,
+                    run_id=run_id,
                     data={
                         "usage": dict(total_usage),
                         "latency_ms": total_latency_ms,
                         "llm_calls": llm_calls,
                     },
+                )
+                yield done_event
+                await self._emit_event(
+                    "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
                 )
                 self._set_session_run_stats(
                     usage=total_usage,
@@ -234,22 +306,27 @@ class AgentRunner:
                 step=step_count,
                 task=task,
             )
-            yield AgentEvent(
-                type="text_delta",
-                session_id=self.session.session_id,
+            text_event = await self._emit_event(
+                "text_delta",
                 step=step_count,
+                run_id=run_id,
                 data={"content": limit_message},
             )
-            yield AgentEvent(
-                type="done",
-                session_id=self.session.session_id,
+            yield text_event
+            done_event = await self._emit_event(
+                "done",
                 step=step_count,
+                run_id=run_id,
                 data={
                     "reason": "max_steps",
                     "usage": dict(total_usage),
                     "latency_ms": total_latency_ms,
                     "llm_calls": llm_calls,
                 },
+            )
+            yield done_event
+            await self._emit_event(
+                "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
             )
             self._set_session_run_stats(
                 usage=total_usage,
@@ -262,10 +339,10 @@ class AgentRunner:
                 latency_ms=total_latency_ms,
                 llm_calls=llm_calls,
             )
-            yield AgentEvent(
-                type="error",
-                session_id=self.session.session_id,
+            error_event = await self._emit_event(
+                "error",
                 step=step_count,
+                run_id=run_id,
                 data={
                     "message": str(exc),
                     "error_type": type(exc).__name__,
@@ -274,6 +351,7 @@ class AgentRunner:
                     "llm_calls": llm_calls,
                 },
             )
+            yield error_event
 
     def _copy_messages(self) -> list[Message]:
         return [message.model_copy(deep=True) for message in self.session.context.get_messages()]
@@ -281,7 +359,9 @@ class AgentRunner:
     def _append_tool_messages(self, tool_messages: list[Message]) -> None:
         """把工具输出写回当前会话上下文。"""
         for tool_message in tool_messages:
-            self.session.context.add_tool_message(tool_message.content or "", tool_message.tool_call_id)
+            self.session.context.add_tool_message(
+                tool_message.content or "", tool_message.tool_call_id
+            )
 
     def _iter_tool_feedback_chunks(self, tool_messages: list[Message]):
         """把工具错误转换成流式 chunk，便于上层统一消费。"""
@@ -296,11 +376,25 @@ class AgentRunner:
         *,
         step: int,
         task: "Task | None" = None,
+        run_id: str | None = None,
     ) -> Message:
+        tool = self.tool_executor.registry.get(tool_call.function.name)
+        await self._emit_event(
+            "tool_start",
+            step=step,
+            run_id=run_id,
+            data={
+                "tool_name": tool_call.function.name,
+                "args": tool_call.function.arguments,
+                "tool_call_id": tool_call.id,
+                "side_effect": bool(tool and tool.execution.side_effect),
+                "requires_approval": bool(tool and tool.execution.requires_approval),
+            },
+        )
         try:
-            await self.hooks.before_tool(self.session, tool_call, step=step, task=task)
+            await self.hooks.before_tool(self.session, tool_call, step=step, task=task, tool=tool)
         except ToolApprovalRejected as exc:
-            return self._build_tool_error_message(
+            tool_message = self._build_tool_error_message(
                 tool_call,
                 error_type=type(exc).__name__,
                 message=str(exc),
@@ -312,10 +406,47 @@ class AgentRunner:
                     ),
                 },
             )
+            await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
+            return tool_message
 
         tool_message = await self.tool_executor.execute_one(tool_call)
-        await self.hooks.after_tool(self.session, tool_call, tool_message, step=step, task=task)
+        await self.hooks.after_tool(
+            self.session,
+            tool_call,
+            tool_message,
+            step=step,
+            task=task,
+            tool=tool,
+        )
+        await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
         return tool_message
+
+    async def _emit_tool_result_event(
+        self,
+        tool_call: ToolCall,
+        tool_message: Message,
+        *,
+        step: int,
+        run_id: str | None,
+    ) -> None:
+        data = {
+            "tool_name": tool_call.function.name,
+            "tool_call_id": tool_call.id,
+            "output": tool_message.content,
+        }
+        await self._emit_event("tool_end", step=step, run_id=run_id, data=data)
+        error_message = self.tool_executor.extract_error_message(tool_message.content)
+        if error_message:
+            await self._emit_event(
+                "tool_error",
+                step=step,
+                run_id=run_id,
+                data={
+                    "message": error_message,
+                    "tool_name": tool_call.function.name,
+                    "tool_call_id": tool_call.id,
+                },
+            )
 
     def _build_tool_error_message(
         self,
@@ -347,16 +478,32 @@ class AgentRunner:
         *,
         step: int,
         task: "Task | None" = None,
+        run_id: str | None = None,
     ) -> list[Message]:
         """执行工具调用，并在每次调用前后触发 hook。"""
         if self.session.parallel_tool_calls and len(tool_calls) > 1:
             return await asyncio.gather(
-                *(self._execute_one_tool_call(tool_call, step=step, task=task) for tool_call in tool_calls)
+                *(
+                    self._execute_one_tool_call(
+                        tool_call,
+                        step=step,
+                        task=task,
+                        run_id=run_id,
+                    )
+                    for tool_call in tool_calls
+                )
             )
 
         results: list[Message] = []
         for tool_call in tool_calls:
-            results.append(await self._execute_one_tool_call(tool_call, step=step, task=task))
+            results.append(
+                await self._execute_one_tool_call(
+                    tool_call,
+                    step=step,
+                    task=task,
+                    run_id=run_id,
+                )
+            )
         return results
 
     async def _run_non_stream(
@@ -370,8 +517,10 @@ class AgentRunner:
         llm_calls = 0
         total_latency_ms = 0
         total_usage = self._empty_usage()
+        run_id = uuid4().hex
         context = self.session.context
         context.add_user_message(user_input)
+        await self._emit_event("run_start", step=0, run_id=run_id, data={"input": user_input})
 
         try:
             while step_count < self.session.max_steps:
@@ -385,6 +534,12 @@ class AgentRunner:
                     task=task,
                 )
 
+                await self._emit_event(
+                    "llm_start",
+                    step=step_count,
+                    run_id=run_id,
+                    data={"tools": [tool.name for tool in tools]},
+                )
                 response: LLMResponse = await self.llm.generate(
                     messages,
                     tools=tools,
@@ -392,6 +547,16 @@ class AgentRunner:
                 llm_calls += 1
                 total_latency_ms += response.latency_ms
                 self._merge_usage(total_usage, response.usage)
+                await self._emit_event(
+                    "llm_end",
+                    step=step_count,
+                    run_id=run_id,
+                    data={
+                        "finish_reason": response.finish_reason,
+                        "latency_ms": response.latency_ms,
+                        "usage": dict(response.usage),
+                    },
+                )
 
                 await self.hooks.after_llm(
                     self.session,
@@ -411,31 +576,58 @@ class AgentRunner:
                         response.message.tool_calls,
                         step=step_count,
                         task=task,
+                        run_id=run_id,
                     )
                     self._append_tool_messages(tool_messages)
                     step_count += 1
                     continue
 
-                return self._build_run_result(
+                result = self._build_run_result(
                     content=response.message.content or "",
                     usage=total_usage,
                     latency_ms=total_latency_ms,
                     llm_calls=llm_calls,
                 )
+                await self._emit_event(
+                    "run_end",
+                    step=step_count,
+                    run_id=run_id,
+                    data=result.model_dump(),
+                )
+                return result
 
             limit_message = "任务未完成，已达到最大步骤限制。"
             context.add_ai_message(limit_message)
-            return self._build_run_result(
+            result = self._build_run_result(
                 content=limit_message,
                 usage=total_usage,
                 latency_ms=total_latency_ms,
                 llm_calls=llm_calls,
             )
-        except Exception:
+            await self._emit_event(
+                "run_end",
+                step=step_count,
+                run_id=run_id,
+                data={**result.model_dump(), "reason": "max_steps"},
+            )
+            return result
+        except Exception as exc:
             self._set_session_run_stats(
                 usage=total_usage,
                 latency_ms=total_latency_ms,
                 llm_calls=llm_calls,
+            )
+            await self._emit_event(
+                "error",
+                step=step_count,
+                run_id=run_id,
+                data={
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
+                    "usage": dict(total_usage),
+                    "latency_ms": total_latency_ms,
+                    "llm_calls": llm_calls,
+                },
             )
             raise
 
@@ -450,8 +642,10 @@ class AgentRunner:
         llm_calls = 0
         total_latency_ms = 0
         total_usage = self._empty_usage()
+        run_id = uuid4().hex
         context = self.session.context
         context.add_user_message(user_input)
+        await self._emit_event("run_start", step=0, run_id=run_id, data={"input": user_input})
 
         try:
             while step_count < self.session.max_steps:
@@ -469,6 +663,12 @@ class AgentRunner:
                 )
 
                 llm_start = time.monotonic()
+                await self._emit_event(
+                    "llm_start",
+                    step=step_count,
+                    run_id=run_id,
+                    data={"tools": [tool.name for tool in tools]},
+                )
                 stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
                     messages,
                     tools=tools,
@@ -479,9 +679,21 @@ class AgentRunner:
                 async for chunk in stream:
                     if chunk.reasoning_content:
                         reasoning_parts.append(chunk.reasoning_content)
+                        await self._emit_event(
+                            "reasoning_delta",
+                            step=step_count,
+                            run_id=run_id,
+                            data={"content": chunk.reasoning_content},
+                        )
 
                     if chunk.content:
                         content_parts.append(chunk.content)
+                        await self._emit_event(
+                            "text_delta",
+                            step=step_count,
+                            run_id=run_id,
+                            data={"content": chunk.content},
+                        )
                         yield chunk
                     elif chunk.reasoning_content:
                         yield chunk
@@ -492,6 +704,16 @@ class AgentRunner:
                         full_tool_calls = chunk.tool_calls_complete
 
                 total_latency_ms += int((time.monotonic() - llm_start) * 1000)
+                await self._emit_event(
+                    "llm_end",
+                    step=step_count,
+                    run_id=run_id,
+                    data={
+                        "latency_ms": total_latency_ms,
+                        "usage": dict(total_usage),
+                        "has_tool_calls": bool(full_tool_calls),
+                    },
+                )
                 ai_message = context.add_ai_message(
                     "".join(content_parts),
                     tool_calls=full_tool_calls,
@@ -509,6 +731,7 @@ class AgentRunner:
                         full_tool_calls,
                         step=step_count,
                         task=task,
+                        run_id=run_id,
                     )
                     self._append_tool_messages(tool_messages)
                     for chunk in self._iter_tool_feedback_chunks(tool_messages):
@@ -520,6 +743,16 @@ class AgentRunner:
                     usage=total_usage,
                     latency_ms=total_latency_ms,
                     llm_calls=llm_calls,
+                )
+                await self._emit_event(
+                    "run_end",
+                    step=step_count,
+                    run_id=run_id,
+                    data={
+                        "usage": dict(total_usage),
+                        "latency_ms": total_latency_ms,
+                        "llm_calls": llm_calls,
+                    },
                 )
                 return
 
@@ -536,11 +769,34 @@ class AgentRunner:
                 latency_ms=total_latency_ms,
                 llm_calls=llm_calls,
             )
+            await self._emit_event(
+                "run_end",
+                step=step_count,
+                run_id=run_id,
+                data={
+                    "reason": "max_steps",
+                    "usage": dict(total_usage),
+                    "latency_ms": total_latency_ms,
+                    "llm_calls": llm_calls,
+                },
+            )
             yield LLMResponseChunk(content=limit_message, finish_reason="stop")
-        except Exception:
+        except Exception as exc:
             self._set_session_run_stats(
                 usage=total_usage,
                 latency_ms=total_latency_ms,
                 llm_calls=llm_calls,
+            )
+            await self._emit_event(
+                "error",
+                step=step_count,
+                run_id=run_id,
+                data={
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
+                    "usage": dict(total_usage),
+                    "latency_ms": total_latency_ms,
+                    "llm_calls": llm_calls,
+                },
             )
             raise

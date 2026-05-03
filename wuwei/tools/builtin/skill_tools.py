@@ -141,6 +141,9 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             "只有在已经加载该 skill 且正文明确要求执行脚本时才使用。"
             "必须传入 load_skill 返回的 load_token。"
         ),
+        timeout_seconds=SKILL_SCRIPT_TIMEOUT_SECONDS + 1,
+        side_effect=True,
+        requires_approval=True,
     )
     def run_skill_python_script(
         skill_name: str,

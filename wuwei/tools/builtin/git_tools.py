@@ -149,7 +149,12 @@ def register_git_tools(registry: ToolRegistry) -> None:
         args = ["show", "--stat", revision] if stat_only else ["show", revision]
         return _run_git(args, workspace=workspace, max_output_chars=max_output_chars)
 
-    @registry.tool(name="git_add", description="暂存 workspace 内的指定文件。")
+    @registry.tool(
+        name="git_add",
+        description="暂存 workspace 内的指定文件。",
+        side_effect=True,
+        requires_approval=True,
+    )
     def git_add(path: str, workspace: str = ".") -> dict[str, Any]:
         """暂存文件。
 
@@ -159,7 +164,12 @@ def register_git_tools(registry: ToolRegistry) -> None:
         _resolve_workspace_path(path, workspace=workspace)
         return _run_git(["add", "--", path], workspace=workspace)
 
-    @registry.tool(name="git_commit", description="创建 Git commit。通常应配合 HITL 审批使用。")
+    @registry.tool(
+        name="git_commit",
+        description="创建 Git commit。通常应配合 HITL 审批使用。",
+        side_effect=True,
+        requires_approval=True,
+    )
     def git_commit(message: str, workspace: str = ".") -> dict[str, Any]:
         """创建 Git commit。
 

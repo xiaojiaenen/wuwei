@@ -12,14 +12,16 @@ class ConsoleHook(RuntimeHook):
             f"step={step} finish_reason={response.finish_reason}"
         )
 
-    async def before_tool(self, session, tool_call, *, step: int, task=None) -> None:
+    async def before_tool(self, session, tool_call, *, step: int, task=None, tool=None) -> None:
         args_text = json.dumps(tool_call.function.arguments, ensure_ascii=False)
         print(
             f"[tool.start] session={session.session_id} "
             f"step={step} name={tool_call.function.name} args={args_text}"
         )
 
-    async def after_tool(self, session, tool_call, tool_message, *, step: int, task=None) -> None:
+    async def after_tool(
+        self, session, tool_call, tool_message, *, step: int, task=None, tool=None
+    ) -> None:
         print(
             f"[tool.end] session={session.session_id} "
             f"step={step} name={tool_call.function.name} result={tool_message.content}"

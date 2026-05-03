@@ -26,5 +26,5 @@ class StorageHook(RuntimeHook):
         if session.summary:
             await self.storage.save_meta(session)
 
-    async def after_tool(self, session, tool_call, tool_message, *, step, task=None):
+    async def after_tool(self, session, tool_call, tool_message, *, step, task=None, tool=None):
         await self.storage.append_message(session.session_id, tool_message)
