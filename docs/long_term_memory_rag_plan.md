@@ -1,605 +1,801 @@
-# Wuwei 长期记忆与 RAG 最小方案
+# 长期记忆 & RAG 开发指南
 
-本文给出一份适合 Wuwei 的长期记忆与 RAG 设计方案，目标是：
+本文档告诉你怎么一步步把长期记忆和 RAG 做出来。不搞复杂设计，直接上代码。
 
-- 保持框架边界清晰
-- 先做最小可用版本
-- 不把 MySQL、向量库、Embedding 服务写死到 core
-- 尽量复用现有 `session / runtime hook / storage / tools` 结构
+## 目标
 
-这份方案偏框架设计，不是业务产品设计。
+两个功能：
 
-## 1. 目标
+1. **长期记忆** — Agent 能记住重要信息（用户偏好、关键决策），下次对话自动用上
+2. **RAG** — Agent 能从文档中检索相关内容，注入到当前对话
 
-希望框架原生支持两类能力：
+两者都通过 Hook 接入，不改 AgentRunner 主循环。
 
-1. 长期记忆
-   - 记住用户偏好、稳定事实、项目约束、重要结论
-   - 在后续对话中按需取回
+## 新增文件
 
-2. RAG
-   - 从知识库、文档、代码片段中检索相关内容
-   - 把检索结果注入当前 prompt
-
-最小版本不追求：
-
-- 多租户后台
-- 复杂权限系统
-- 自动知识同步平台
-- 重排序模型、混合检索、图谱检索
-- 强绑定某个向量数据库
-
-## 2. 设计原则
-
-### 2.1 记忆和 RAG 分开
-
-不要把“长期记忆”和“RAG”混成一个 store。
-
-- 长期记忆更像“少量、高价值、可持续复用的信息”
-- RAG 更像“外部知识片段检索”
-
-两者虽然都可以在 `before_llm` 阶段注入上下文，但来源、生命周期、写入方式都不同。
-
-建议在框架里分成两套协议：
-
-- `MemoryStore`
-- `KnowledgeStore`
-
-### 2.2 Core 只定义协议
-
-Wuwei core 只负责定义：
-
-- 数据模型
-- 存取协议
-- Hook 扩展点
-- 默认轻量实现
-
-不要在 core 中直接依赖：
-
-- Qdrant
-- Milvus
-- pgvector
-- Elasticsearch
-- OpenSearch
-- 指定 Embedding 供应商
-
-这些都应该作为 adapter 或 example。
-
-### 2.3 默认先做简单检索
-
-第一版不要追求“最强检索”，而要追求“最稳接口”。
-
-建议默认分两层：
-
-1. 抽象协议
-2. 一个非常轻量的默认实现
-
-默认实现可以是：
-
-- 长期记忆：`InMemoryMemoryStore`
-- RAG：`InMemoryKnowledgeStore`
-
-这样框架测试、文档示例、接口稳定性都可以先跑起来。
-
-## 3. 建议的模块边界
-
-建议新增这些文件：
-
-```text
+```
 wuwei/
   memory/
-    memory_store.py       # 长期记忆协议 + 默认实现
-    knowledge_store.py    # RAG 知识库协议 + 默认实现
-    embedder.py           # Embedding 协议
-    memory_types.py       # MemoryRecord / KnowledgeChunk 等数据模型
+    memory_types.py       # 数据模型：MemoryRecord、KnowledgeChunk
+    memory_store.py       # 长期记忆存储协议 + 内存实现
+    knowledge_store.py    # 知识库存储协议 + 内存实现
+    embedder.py           # Embedding 协议 + 内置实现
   runtime/
-    memory_hook.py        # 记忆检索 / 记忆抽取
-    rag_hook.py           # RAG 检索注入
+    memory_hook.py        # MemoryRetrievalHook + MemoryExtractionHook
+    rag_hook.py           # RagRetrievalHook
 ```
 
-如果你想更少文件，也可以先合并成：
+---
 
-```text
-wuwei/
-  memory/
-    stores.py
-    types.py
-  runtime/
-    memory_hook.py
-```
+## 第一步：数据模型
 
-但从长期维护看，分开会更清楚。
-
-## 4. 数据模型
-
-## 4.1 长期记忆
-
-长期记忆建议是结构化记录，而不是单纯字符串。
+新建 `wuwei/memory/memory_types.py`：
 
 ```python
 from dataclasses import dataclass, field
-from typing import Any
 from datetime import datetime
+from typing import Any
 
 
 @dataclass
 class MemoryRecord:
-    id: str
-    content: str
-    memory_type: str = "fact"
-    namespace: str = "default"
-    confidence: float = 0.8
-    importance: float = 0.5
+    """一条长期记忆。"""
+    id: str                                    # 唯一 ID（uuid4.hex）
+    content: str                               # 记忆正文，一句话或一小段
+    memory_type: str = "fact"                  # fact / preference / constraint / summary
+    namespace: str = "default"                 # 用于隔离不同用户/项目
+    importance: float = 0.5                    # 0~1，越高越重要
+    confidence: float = 0.8                    # 0~1，越高越确定
+    embedding: list[float] | None = None       # 向量，可选
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
-    updated_at: datetime | None = None
-```
-
-建议支持这些 `memory_type`：
-
-- `fact`
-- `preference`
-- `constraint`
-- `summary`
-- `warning`
-
-最小版本先不要做太多类型，够用即可。
-
-## 4.2 RAG 知识块
-
-RAG 建议单独定义 chunk 结构：
-
-```python
-from dataclasses import dataclass, field
-from typing import Any
+    last_accessed: datetime | None = None      # 上次被检索到的时间
+    access_count: int = 0                      # 被检索到的次数
 
 
 @dataclass
 class KnowledgeChunk:
+    """知识库中的一个片段。"""
     id: str
-    text: str
-    source: str
+    text: str                                  # 片段正文
+    source: str                                # 来源文件路径或 URL
     namespace: str = "default"
     title: str | None = None
+    embedding: list[float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
-这里不要过早绑定：
+要点：
+- `MemoryRecord` 有 `importance` 和 `confidence`，检索时可以加权排序
+- `KnowledgeChunk` 有 `source`，方便按来源批量删除/更新
+- 两者都有 `embedding` 字段，但允许为 None（无 Embedder 时退化为关键词匹配）
 
-- embedding 向量字段
-- 分数计算方式
-- 存储引擎字段
+---
 
-这些应该留给具体 store 实现决定。
+## 第二步：Embedding 协议 + 内置实现
 
-## 5. 协议设计
-
-## 5.1 Embedding 协议
-
-RAG 迟早会需要 embedding，但不要把 embedding 逻辑塞进 store 里。
+新建 `wuwei/memory/embedder.py`：
 
 ```python
 from typing import Protocol
+import math
 
 
 class Embedder(Protocol):
+    """Embedding 协议。任何 Embedding 服务都实现这个接口。"""
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """批量文本转向量。"""
         ...
 
     async def embed_query(self, text: str) -> list[float]:
-        ...
+        """单条查询转向量。默认调 embed_texts 取第一条。"""
+        results = await self.embed_texts([text])
+        return results[0]
+
+
+class OpenAIEmbedder:
+    """OpenAI Embedding 适配器。"""
+
+    def __init__(self, api_key: str, model: str = "text-embedding-3-small", base_url: str | None = None):
+        from openai import AsyncOpenAI
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        response = await self.client.embeddings.create(input=texts, model=self.model)
+        return [item.embedding for item in response.data]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return (await self.embed_texts([text]))[0]
+
+
+class SimpleEmbedder:
+    """零依赖的简易 Embedder，基于字符 n-gram 哈希。仅供测试和演示。"""
+
+    def __init__(self, dim: int = 256):
+        self.dim = dim
+
+    def _text_to_vec(self, text: str) -> list[float]:
+        vec = [0.0] * self.dim
+        text = text.lower().strip()
+        for i in range(len(text) - 1):
+            bigram = text[i:i+2]
+            h = hash(bigram) % self.dim
+            vec[h] += 1.0
+        # 归一化
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm > 0:
+            vec = [x / norm for x in vec]
+        return vec
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self._text_to_vec(t) for t in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return self._text_to_vec(text)
 ```
 
-这样以后接 OpenAI、本地模型、第三方服务都方便。
+要点：
+- `Embedder` 是 Protocol，你接 OpenAI、Cohere、本地模型都行
+- `SimpleEmbedder` 零依赖，用字符 bigram 哈希生成向量，效果一般但能跑通整个流程
+- 生产环境用 `OpenAIEmbedder` 或接入 sentence-transformers
 
-## 5.2 长期记忆协议
+---
+
+## 第三步：长期记忆存储
+
+新建 `wuwei/memory/memory_store.py`：
 
 ```python
-from typing import Protocol, Any
+import math
+from typing import Protocol
+from uuid import uuid4
+
+from wuwei.memory.memory_types import MemoryRecord
+from wuwei.memory.embedder import Embedder
 
 
 class MemoryStore(Protocol):
-    async def add(
-        self,
-        content: str,
-        *,
-        namespace: str = "default",
-        memory_type: str = "fact",
-        importance: float = 0.5,
-        confidence: float = 0.8,
-        tags: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> MemoryRecord:
+    """长期记忆存储协议。"""
+
+    async def add(self, content: str, *, namespace: str = "default",
+                  memory_type: str = "fact", importance: float = 0.5,
+                  confidence: float = 0.8, tags: list[str] | None = None,
+                  metadata: dict | None = None) -> MemoryRecord:
+        """存一条记忆，返回 MemoryRecord。"""
         ...
 
-    async def search(
-        self,
-        query: str,
-        *,
-        namespace: str = "default",
-        limit: int = 5,
-        metadata: dict[str, Any] | None = None,
-    ) -> list[MemoryRecord]:
+    async def search(self, query: str, *, namespace: str = "default",
+                     limit: int = 5) -> list[MemoryRecord]:
+        """语义检索相关记忆。"""
         ...
 
     async def delete(self, memory_id: str) -> None:
+        """删除一条记忆。"""
         ...
+
+    async def list_all(self, *, namespace: str = "default") -> list[MemoryRecord]:
+        """列出所有记忆（调试用）。"""
+        ...
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+class InMemoryMemoryStore:
+    """内存版长期记忆存储，零外部依赖。"""
+
+    def __init__(self, embedder: Embedder | None = None):
+        self._records: dict[str, MemoryRecord] = {}
+        self._embedder = embedder
+
+    async def add(self, content: str, *, namespace: str = "default",
+                  memory_type: str = "fact", importance: float = 0.5,
+                  confidence: float = 0.8, tags: list[str] | None = None,
+                  metadata: dict | None = None) -> MemoryRecord:
+        from datetime import datetime, timezone
+        embedding = None
+        if self._embedder:
+            embedding = (await self._embedder.embed_texts([content]))[0]
+
+        record = MemoryRecord(
+            id=uuid4().hex,
+            content=content,
+            memory_type=memory_type,
+            namespace=namespace,
+            importance=importance,
+            confidence=confidence,
+            embedding=embedding,
+            tags=tags or [],
+            metadata=metadata or {},
+            created_at=datetime.now(timezone.utc),
+        )
+        self._records[record.id] = record
+        return record
+
+    async def search(self, query: str, *, namespace: str = "default",
+                     limit: int = 5) -> list[MemoryRecord]:
+        candidates = [r for r in self._records.values() if r.namespace == namespace]
+        if not candidates:
+            return []
+
+        if self._embedder:
+            # 向量检索
+            query_vec = await self._embedder.embed_query(query)
+            scored = []
+            for r in candidates:
+                if r.embedding is not None:
+                    sim = _cosine_similarity(query_vec, r.embedding)
+                    score = sim * 0.6 + r.importance * 0.3 + r.confidence * 0.1
+                    scored.append((score, r))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            results = [r for _, r in scored[:limit]]
+        else:
+            # 关键词匹配退化
+            query_lower = query.lower()
+            scored = []
+            for r in candidates:
+                overlap = sum(1 for word in query_lower.split() if word in r.content.lower())
+                score = overlap * 0.5 + r.importance * 0.3 + r.confidence * 0.2
+                scored.append((score, r))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            results = [r for _, r in scored[:limit]]
+
+        # 更新访问统计
+        from datetime import datetime, timezone
+        for r in results:
+            r.last_accessed = datetime.now(timezone.utc)
+            r.access_count += 1
+
+        return results
+
+    async def delete(self, memory_id: str) -> None:
+        self._records.pop(memory_id, None)
+
+    async def list_all(self, *, namespace: str = "default") -> list[MemoryRecord]:
+        return [r for r in self._records.values() if r.namespace == namespace]
 ```
 
-最小版本先保留：
+要点：
+- 有 Embedder 时用余弦相似度 + importance/confidence 加权排序
+- 没有 Embedder 时退化为关键词匹配，照样能用
+- `access_count` 和 `last_accessed` 会自动更新，方便后续做衰减
 
-- `add`
-- `search`
-- `delete`
+---
 
-不要一开始就塞进：
+## 第四步：知识库存储（RAG）
 
-- update
-- batch upsert
-- TTL
-- soft delete
-- 审计日志
-
-这些以后再扩。
-
-## 5.3 RAG 知识库协议
+新建 `wuwei/memory/knowledge_store.py`：
 
 ```python
-from typing import Protocol, Any
+from typing import Protocol
+from uuid import uuid4
+
+from wuwei.memory.memory_types import KnowledgeChunk
+from wuwei.memory.embedder import Embedder
+from wuwei.memory.memory_store import _cosine_similarity
 
 
 class KnowledgeStore(Protocol):
-    async def upsert_chunks(
-        self,
-        chunks: list[KnowledgeChunk],
-        *,
-        namespace: str = "default",
-    ) -> None:
+    """RAG 知识库存储协议。"""
+
+    async def ingest(self, text: str, source: str, *, namespace: str = "default",
+                     title: str | None = None, chunk_size: int = 800,
+                     chunk_overlap: int = 100) -> list[KnowledgeChunk]:
+        """将文本切块并存入知识库。返回所有生成的 chunk。"""
         ...
 
-    async def search(
-        self,
-        query: str,
-        *,
-        namespace: str = "default",
-        limit: int = 5,
-        metadata: dict[str, Any] | None = None,
-    ) -> list[KnowledgeChunk]:
+    async def search(self, query: str, *, namespace: str = "default",
+                     limit: int = 4) -> list[KnowledgeChunk]:
+        """语义检索相关片段。"""
         ...
 
-    async def delete_by_source(
-        self,
-        source: str,
-        *,
-        namespace: str = "default",
-    ) -> None:
+    async def delete_by_source(self, source: str, *, namespace: str = "default") -> None:
+        """按来源文件删除所有相关 chunk。"""
         ...
+
+
+def _split_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
+    """按字符数切块，保留 overlap 重叠。"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk.strip())
+        start = end - overlap
+    return chunks
+
+
+class InMemoryKnowledgeStore:
+    """内存版知识库，零外部依赖。"""
+
+    def __init__(self, embedder: Embedder | None = None):
+        self._chunks: dict[str, KnowledgeChunk] = {}
+        self._embedder = embedder
+
+    async def ingest(self, text: str, source: str, *, namespace: str = "default",
+                     title: str | None = None, chunk_size: int = 800,
+                     chunk_overlap: int = 100) -> list[KnowledgeChunk]:
+        # 先删除同一来源的旧数据
+        await self.delete_by_source(source, namespace=namespace)
+
+        pieces = _split_text(text, chunk_size, chunk_overlap)
+        chunks = []
+
+        embeddings = None
+        if self._embedder and pieces:
+            embeddings = await self._embedder.embed_texts(pieces)
+
+        for i, piece in enumerate(pieces):
+            chunk = KnowledgeChunk(
+                id=uuid4().hex,
+                text=piece,
+                source=source,
+                namespace=namespace,
+                title=title,
+                embedding=embeddings[i] if embeddings else None,
+            )
+            self._chunks[chunk.id] = chunk
+            chunks.append(chunk)
+
+        return chunks
+
+    async def search(self, query: str, *, namespace: str = "default",
+                     limit: int = 4) -> list[KnowledgeChunk]:
+        candidates = [c for c in self._chunks.values() if c.namespace == namespace]
+        if not candidates:
+            return []
+
+        if self._embedder:
+            query_vec = await self._embedder.embed_query(query)
+            scored = []
+            for c in candidates:
+                if c.embedding is not None:
+                    sim = _cosine_similarity(query_vec, c.embedding)
+                    scored.append((sim, c))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return [c for _, c in scored[:limit]]
+        else:
+            # 关键词匹配退化
+            query_lower = query.lower()
+            scored = []
+            for c in candidates:
+                overlap = sum(1 for w in query_lower.split() if w in c.text.lower())
+                scored.append((overlap, c))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return [c for _, c in scored[:limit]]
+
+    async def delete_by_source(self, source: str, *, namespace: str = "default") -> None:
+        to_delete = [cid for cid, c in self._chunks.items()
+                     if c.source == source and c.namespace == namespace]
+        for cid in to_delete:
+            del self._chunks[cid]
 ```
 
-`upsert_chunks()` 比 “只 add 不 upsert” 更适合 RAG，因为文档重建索引是常见操作。
+要点：
+- `ingest()` 会自动切块、自动 embed、自动删除同来源旧数据
+- chunk_size 默认 800 字符，overlap 100 字符，适合大多数文档
+- 没有 Embedder 时退化为关键词匹配
 
-## 6. Hook 接入方案
+---
 
-Wuwei 现在最合适的接入点仍然是 runtime hook。
+## 第五步：Hook — 记忆检索
 
-## 6.1 MemoryRetrievalHook
+在 `wuwei/runtime/memory_hook.py` 中实现：
 
-职责：
+```python
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
-- 在 `before_llm` 阶段检索相关长期记忆
-- 注入一条 system message
+from wuwei.runtime.hooks import RuntimeHook
 
-行为建议：
+if TYPE_CHECKING:
+    from wuwei.agent.session import AgentSession
+    from wuwei.llm import Message
+    from wuwei.memory.memory_store import MemoryStore
+    from wuwei.tools import Tool
 
-- 从最近几条 user/assistant 消息拼查询词
-- 用 `session.metadata` 作为过滤条件的一部分
-- 最多注入 3 到 5 条记忆
 
-注入格式建议保持简单：
+class MemoryRetrievalHook(RuntimeHook):
+    """在每次 LLM 调用前，检索相关长期记忆并注入 system prompt。"""
 
-```text
-以下是可能相关的长期记忆，仅在与当前任务相关时使用：
-- [preference] 用户偏好简洁回答
-- [constraint] 当前项目 Python 最低版本为 3.10
-- [fact] 上次已经确认采用文件存储会话历史
+    def __init__(self, store: "MemoryStore", *, top_k: int = 3, namespace: str = "default"):
+        self.store = store
+        self.top_k = top_k
+        self.namespace = namespace
+
+    async def before_llm(self, session: "AgentSession", messages: list["Message"],
+                         tools: list["Tool"], *, step: int, task=None):
+        # 从最近几条消息拼出查询词
+        recent_texts = []
+        for msg in messages[-6:]:
+            if msg.role in ("user", "assistant") and msg.content:
+                recent_texts.append(msg.content[:200])
+        query = " ".join(recent_texts)
+        if not query.strip():
+            return messages, tools
+
+        # 检索
+        records = await self.store.search(query, namespace=self.namespace, limit=self.top_k)
+        if not records:
+            return messages, tools
+
+        # 格式化注入
+        lines = ["以下是可能相关的长期记忆，仅在与当前任务相关时使用："]
+        for r in records:
+            tag = f"[{r.memory_type}]"
+            lines.append(f"- {tag} {r.content}")
+        injection = "\n".join(lines)
+
+        # 插入到 system message 之后
+        from wuwei.llm.types import Message as LLMMessage
+        memory_msg = LLMMessage(role="system", content=injection)
+
+        new_messages = []
+        system_inserted = False
+        for msg in messages:
+            new_messages.append(msg)
+            if msg.role == "system" and not system_inserted:
+                new_messages.append(memory_msg)
+                system_inserted = True
+        if not system_inserted:
+            new_messages.insert(0, memory_msg)
+
+        return new_messages, tools
 ```
 
-不要把完整 JSON 原样塞给模型。
+工作原理：
+1. 拿最近 6 条消息拼成查询词
+2. 去 MemoryStore 语义检索 top_k 条
+3. 格式化为 `[fact] xxx` 的列表，插入 system message 后面
+4. 对 LLM 来说，就像 system prompt 里多了一段"记忆上下文"
 
-## 6.2 MemoryExtractionHook
+---
 
-职责：
+## 第六步：Hook — 记忆抽取
 
-- 在一轮运行结束后，从最近对话中抽取值得长期保存的记忆
+在同一个文件中继续：
 
-最小版本建议：
+```python
+import json
+from wuwei.runtime.hooks import RuntimeHook
+from wuwei.memory.memory_store import MemoryStore
 
-- 先用 LLM 抽取
-- 严格限制只提取“稳定信息”
-- 输出 JSON
-- 抽取条数限制为 0 到 3 条
 
-建议只保存：
+EXTRACTION_PROMPT = """分析以下对话，提取值得长期记住的信息。
 
-- 用户明确偏好
-- 稳定事实
-- 项目长期约束
-- 已确认的重要决策
+只提取以下类型的信息：
+- preference: 用户明确表达的偏好（如"我喜欢简洁的回答"）
+- fact: 已确认的稳定事实（如"项目用 Python 3.12"）
+- constraint: 长期约束（如"代码不要用第三方库"）
+- summary: 对话中达成的重要结论
 
-不要保存：
+不要提取：
+- 临时任务、一次性问答
+- 模型的猜测或不确定的信息
+- 已经是常识的信息
 
-- 临时任务
-- 一次性问答
-- 短期状态
-- 模型猜测
+输出 JSON 数组，每条包含 type 和 content。最多 3 条。如果没有值得记住的信息，输出空数组 []。
 
-### 是否需要新 Hook 生命周期
+对话内容：
+{conversation}
 
-建议加一个新的运行结束钩子：
+输出（纯 JSON，不要 markdown）："""
+
+
+class MemoryExtractionHook(RuntimeHook):
+    """在一轮运行结束后，用 LLM 从对话中抽取值得记住的记忆。"""
+
+    def __init__(self, llm, store: MemoryStore, *, namespace: str = "default",
+                 max_memories_per_run: int = 3):
+        self.llm = llm
+        self.store = store
+        self.namespace = namespace
+        self.max_memories = max_memories_per_run
+
+    async def after_ai_message(self, session, message, *, step, task=None):
+        # 只在最后一步（没有更多 tool_calls）时抽取
+        # 简化处理：每轮都尝试抽取，靠 prompt 控制输出数量
+
+        # 收集最近对话
+        messages = session.context.get_messages()
+        recent = messages[-10:]  # 最近 10 条
+        conversation = "\n".join(
+            f"{m.role}: {m.content[:300]}" for m in recent if m.content
+        )
+        if len(conversation) < 50:
+            return  # 太短的对话不抽取
+
+        # 调用 LLM 抽取
+        prompt = EXTRACTION_PROMPT.format(conversation=conversation)
+        from wuwei.llm.types import Message as LLMMessage
+        response = await self.llm.generate([LLMMessage(role="user", content=prompt)])
+
+        # 解析结果
+        try:
+            text = response.content.strip()
+            # 去掉可能的 markdown 代码块标记
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            items = json.loads(text)
+        except (json.JSONDecodeError, AttributeError):
+            return  # 解析失败就跳过
+
+        if not isinstance(items, list):
+            return
+
+        # 去重后写入
+        for item in items[:self.max_memories]:
+            if not isinstance(item, dict) or "content" not in item:
+                continue
+            content = item["content"].strip()
+            if not content:
+                continue
+
+            # 简单去重：搜索已有记忆，如果高度相似就跳过
+            existing = await self.store.search(content, namespace=self.namespace, limit=1)
+            if existing and existing[0].content.lower() == content.lower():
+                continue
+
+            await self.store.add(
+                content=content,
+                namespace=self.namespace,
+                memory_type=item.get("type", "fact"),
+                importance=item.get("importance", 0.5),
+                confidence=0.7,  # LLM 抽取的记忆 confidence 稍低
+            )
+```
+
+工作原理：
+1. 每轮 AI 回复后，收集最近 10 条消息
+2. 用 LLM 分析对话，提取值得记住的信息（输出 JSON）
+3. 和已有记忆去重后写入 MemoryStore
+4. 每次最多存 3 条，避免记忆膨胀
+
+---
+
+## 第七步：Hook — RAG 检索
+
+新建 `wuwei/runtime/rag_hook.py`：
+
+```python
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from wuwei.runtime.hooks import RuntimeHook
+
+if TYPE_CHECKING:
+    from wuwei.agent.session import AgentSession
+    from wuwei.llm import Message
+    from wuwei.memory.knowledge_store import KnowledgeStore
+    from wuwei.tools import Tool
+
+
+class RagRetrievalHook(RuntimeHook):
+    """在每次 LLM 调用前，从知识库检索相关片段并注入 system prompt。"""
+
+    def __init__(self, store: "KnowledgeStore", *, top_k: int = 4,
+                 max_chars_per_chunk: int = 500, namespace: str = "default"):
+        self.store = store
+        self.top_k = top_k
+        self.max_chars = max_chars_per_chunk
+        self.namespace = namespace
+
+    async def before_llm(self, session: "AgentSession", messages: list["Message"],
+                         tools: list["Tool"], *, step: int, task=None):
+        # 取最近的用户消息作为查询
+        user_texts = [m.content[:300] for m in messages[-4:]
+                      if m.role == "user" and m.content]
+        query = " ".join(user_texts)
+        if not query.strip():
+            return messages, tools
+
+        chunks = await self.store.search(query, namespace=self.namespace, limit=self.top_k)
+        if not chunks:
+            return messages, tools
+
+        # 格式化
+        lines = ["以下是检索到的参考资料，如不相关可忽略：", ""]
+        for i, chunk in enumerate(chunks, 1):
+            text = chunk.text[:self.max_chars]
+            source = chunk.source
+            title = chunk.title or ""
+            header = f"[{i}] source={source}"
+            if title:
+                header += f" title={title}"
+            lines.append(header)
+            lines.append(text)
+            lines.append("")
+
+        injection = "\n".join(lines)
+
+        from wuwei.llm.types import Message as LLMMessage
+        rag_msg = LLMMessage(role="system", content=injection)
+
+        new_messages = []
+        system_inserted = False
+        for msg in messages:
+            new_messages.append(msg)
+            if msg.role == "system" and not system_inserted:
+                new_messages.append(rag_msg)
+                system_inserted = True
+        if not system_inserted:
+            new_messages.insert(0, rag_msg)
+
+        return new_messages, tools
+```
+
+---
+
+## 第八步：给 RuntimeHook 加 on_run_end
+
+目前 `RuntimeHook` 没有 `on_run_end` 回调。`MemoryExtractionHook` 放在 `after_ai_message` 也能用，但语义上放在 run 结束后更合适。
+
+在 `wuwei/runtime/hooks.py` 的 `RuntimeHook` 类中加：
 
 ```python
 async def on_run_end(self, session, result, *, task=None) -> None:
-    ...
+    """一轮 run 完全结束后调用。"""
+    pass
 ```
 
-原因是长期记忆抽取更适合在一次 run 真正结束后做，而不是绑在 `after_ai_message` 上。
-
-如果你暂时不想改 Hook 生命周期，也可以先在：
-
-- `after_ai_message`
-
-里做一个简化版本，但长期看不如 `on_run_end` 清晰。
-
-## 6.3 RagRetrievalHook
-
-职责：
-
-- 在 `before_llm` 阶段从知识库检索文档片段
-- 将片段压缩后注入 prompt
-
-建议注入格式：
-
-```text
-以下是检索到的参考资料，如不相关可忽略：
-
-[1] source=docs/framework_flow.md
-AgentRunner 负责执行循环，按 hook -> llm -> tool 的顺序推进...
-
-[2] source=README.md
-Wuwei 是一个轻量、可扩展的 Python Agent 框架...
-```
-
-建议限制：
-
-- chunk 数量最多 3 到 6 条
-- 每条 chunk 限制字符数
-- 总注入内容限制在一个较小范围内
-
-第一版不做 rerank 也完全可以。
-
-## 7. 检索策略
-
-## 7.1 长期记忆检索
-
-长期记忆适合“轻量语义检索 + metadata 过滤”。
-
-最小策略：
-
-1. 用 query embedding 做相似度召回
-2. 按 `namespace` 过滤
-3. 可选按 `session.metadata` 过滤
-4. 简单按 `importance + confidence + similarity` 排序
-
-如果暂时不做 embedding，也可以先用：
-
-- 关键词匹配
-- tags 匹配
-- 简单 BM25 或朴素打分
-
-## 7.2 RAG 检索
-
-RAG 比长期记忆更偏“文档找片段”。
-
-最小策略：
-
-1. 文档切块
-2. 建立向量索引
-3. query embedding 检索 top-k
-4. 拼成参考上下文
-
-第一版参数建议：
-
-- chunk size: 500 到 1000 字符
-- overlap: 50 到 150 字符
-- top-k: 4
-
-先用字符切块就够了，不必一开始就做语义分段。
-
-## 8. 写入策略
-
-## 8.1 长期记忆写入
-
-长期记忆一定要“克制写入”。
-
-建议规则：
-
-- 每次 run 最多写 3 条
-- 相似内容优先覆盖或跳过，不要无限增长
-- 低 confidence 不写入
-
-推荐最小去重策略：
-
-1. 先检索相似记忆
-2. 如果高度相似，则跳过或替换
-3. 如果是新信息，则新增
-
-## 8.2 RAG 写入
-
-RAG 的写入不在运行时自动发生，建议明确分离：
-
-- 运行时只负责检索
-- 文档导入单独通过 ingestion 流程完成
-
-也就是说，RAG 不建议在 agent 对话过程中随手写知识库。
-
-这能避免：
-
-- 数据污染
-- 索引反复重建
-- 用户对话内容和知识库内容边界混乱
-
-## 9. 推荐的最小落地顺序
-
-建议分三步做。
-
-### 第一步：先做长期记忆协议和默认实现
-
-交付内容：
-
-- `MemoryRecord`
-- `MemoryStore`
-- `InMemoryMemoryStore`
-- `MemoryRetrievalHook`
-
-先做到“能取回”，不急着自动抽取。
-
-### 第二步：再做 MemoryExtractionHook
-
-交付内容：
-
-- `MemoryExtractionHook`
-- 最小 JSON 抽取 prompt
-- 基础去重策略
-
-到这一步，长期记忆就闭环了。
-
-### 第三步：做最小 RAG
-
-交付内容：
-
-- `KnowledgeChunk`
-- `KnowledgeStore`
-- `Embedder`
-- `RagRetrievalHook`
-- 一个简单的文档切块导入示例
-
-先不做：
-
-- rerank
-- hybrid search
-- agent 自动写知识库
-
-## 10. 推荐的默认实现
-
-为了让框架示例能跑，建议内置两个极简实现。
-
-## 10.1 InMemoryMemoryStore
-
-特点：
-
-- 用 Python list 或 dict 存记录
-- 支持最简单的 search
-- 可用于单元测试和文档示例
-
-## 10.2 InMemoryKnowledgeStore
-
-特点：
-
-- 持有 chunk 列表
-- 如果没有 embedding，就先用朴素关键词召回
-- 如果有 embedder，再升级成向量检索
-
-这样可以保证框架使用者不配置外部基础设施也能先跑通。
-
-## 11. 对现有框架的改动建议
-
-最小改动建议如下：
-
-### 必做
-
-- 新增 `MemoryStore`
-- 新增 `KnowledgeStore`
-- 新增 `MemoryRetrievalHook`
-- 新增 `RagRetrievalHook`
-
-### 推荐做
-
-- 给 `RuntimeHook` 增加 `on_run_end`
-- 在 `AgentRunner` 中调用 `on_run_end`
-
-### 暂时不做
-
-- Web 知识库管理后台
-- 异步索引任务系统
-- 复杂多路召回
-- 自动 rerank
-- 记忆图谱
-
-## 12. API 使用示例
-
-长期记忆：
+然后在 `HookManager` 中加：
 
 ```python
-memory_store = InMemoryMemoryStore()
-
-agent = Agent.from_env(
-    hooks=[
-        MemoryRetrievalHook(memory_store),
-        MemoryExtractionHook(llm, memory_store),
-    ],
-)
+async def on_run_end(self, session, result, *, task=None) -> None:
+    for hook in self._hooks:
+        await hook.on_run_end(session, result, task=task)
 ```
 
-RAG：
+最后在 `AgentRunner._run_non_stream` 和 `_run_stream` 的末尾调用：
 
 ```python
-knowledge_store = InMemoryKnowledgeStore()
-
-agent = Agent.from_env(
-    hooks=[
-        RagRetrievalHook(knowledge_store),
-    ],
-)
+await self.hooks.on_run_end(self.session, result)
 ```
 
-二者一起使用：
+这样 `MemoryExtractionHook` 就可以把 `after_ai_message` 改为 `on_run_end`，只在整轮结束后抽取一次。
+
+---
+
+## 第九步：文档导入工具（RAG）
+
+RAG 还需要一个导入文档的入口。最简单的方式是提供一个工具：
+
+在 `wuwei/tools/builtin/` 下新建 `rag_tools.py`：
 
 ```python
-agent = Agent.from_env(
-    hooks=[
-        MemoryRetrievalHook(memory_store),
-        RagRetrievalHook(knowledge_store),
-        MemoryExtractionHook(llm, memory_store),
-    ],
-)
+from pathlib import Path
+from wuwei.memory.knowledge_store import KnowledgeStore
+
+
+def register_rag_tools(registry, *, knowledge_store: KnowledgeStore):
+    @registry.tool(
+        name="ingest_document",
+        description="将文档导入知识库。支持 txt/md 文件。导入后可用于 RAG 检索。",
+    )
+    async def ingest_document(file_path: str) -> dict:
+        path = Path(file_path).resolve()
+        if not path.exists():
+            return {"ok": False, "error": f"文件不存在: {file_path}"}
+        if path.suffix not in (".txt", ".md", ".markdown"):
+            return {"ok": False, "error": "仅支持 .txt / .md 文件"}
+
+        text = path.read_text(encoding="utf-8", errors="replace")
+        chunks = await knowledge_store.ingest(text, source=str(path))
+        return {"ok": True, "chunks": len(chunks), "source": str(path)}
+
+    @registry.tool(
+        name="search_knowledge",
+        description="从知识库中检索相关文档片段。",
+    )
+    async def search_knowledge(query: str, limit: int = 4) -> dict:
+        chunks = await knowledge_store.search(query, limit=limit)
+        results = []
+        for c in chunks:
+            results.append({
+                "source": c.source,
+                "text": c.text[:500],
+            })
+        return {"ok": True, "results": results}
 ```
 
-推荐注入顺序：
+然后在 `__init__.py` 的 `BUILTIN_TOOL_REGISTRARS` 中注册：
 
-1. MemoryRetrievalHook
-2. RagRetrievalHook
-3. 其他上下文裁剪或压缩 Hook
-4. MemoryExtractionHook
+```python
+"rag": register_rag_tools,
+```
 
-## 13. 最终建议
+使用时：
 
-如果目标是“框架”，那长期记忆和 RAG 最重要的不是一次做全，而是把边界做对。
+```python
+knowledge_store = InMemoryKnowledgeStore(embedder)
+registry = ToolRegistry.from_builtin(["rag"], knowledge_store=knowledge_store)
+```
 
-最适合 Wuwei 的路径是：
+---
 
-1. 把长期记忆和 RAG 分成两套协议
-2. 都通过 hook 接入 runtime
-3. Core 只提供协议和轻量默认实现
-4. 外部向量库、数据库、Embedding 服务通过 adapter 扩展
+## 完整使用示例
 
-这样做的好处是：
+```python
+import asyncio
+from wuwei import Agent, LLMGateway, ToolRegistry
+from wuwei.memory.memory_store import InMemoryMemoryStore
+from wuwei.memory.knowledge_store import InMemoryKnowledgeStore
+from wuwei.memory.embedder import OpenAIEmbedder
+from wuwei.runtime.memory_hook import MemoryRetrievalHook, MemoryExtractionHook
+from wuwei.runtime.rag_hook import RagRetrievalHook
 
-- 框架保持轻
-- API 容易稳定
-- 示例容易写
-- 后续扩展到向量库也不会推翻当前设计
 
-一句话总结：
+async def main():
+    # 1. 创建 Embedder（可选，不传则退化为关键词匹配）
+    llm = LLMGateway.from_env()
+    embedder = OpenAIEmbedder(api_key="sk-xxx")
 
-长期记忆做“少量高价值信息的可持续召回”，RAG 做“外部知识片段检索”，两者共享接入方式，但不要共享同一个抽象。
+    # 2. 创建存储
+    memory_store = InMemoryMemoryStore(embedder)
+    knowledge_store = InMemoryKnowledgeStore(embedder)
+
+    # 3. 导入文档到知识库
+    await knowledge_store.ingest(
+        "Wuwei 是一个轻量 Python Agent 框架...",
+        source="README.md",
+    )
+
+    # 4. 创建 Agent，挂载 Hook
+    agent = Agent(
+        llm=llm,
+        tools=ToolRegistry.from_builtin(["time", "rag"], knowledge_store=knowledge_store),
+        hooks=[
+            MemoryRetrievalHook(memory_store),        # 每次 LLM 调用前注入记忆
+            RagRetrievalHook(knowledge_store),         # 每次 LLM 调用前注入知识片段
+            MemoryExtractionHook(llm, memory_store),   # 每轮结束后抽取新记忆
+        ],
+    )
+
+    # 5. 正常使用
+    session = agent.create_session()
+    result = await agent.run("介绍一下 wuwei 的架构", session=session)
+    print(result.content)
+
+    # 第二轮对话，Agent 会自动记得上一轮的信息
+    result = await agent.run("刚才我们聊了什么？", session=session)
+    print(result.content)
+
+
+asyncio.run(main())
+```
+
+---
+
+## Hook 注册顺序
+
+推荐顺序：
+
+```
+1. MemoryRetrievalHook    # 先注入记忆
+2. RagRetrievalHook       # 再注入知识
+3. ContextCompressionHook # 然后压缩裁剪
+4. StorageHook            # 持久化
+5. MemoryExtractionHook   # 最后抽取新记忆
+```
+
+原因：记忆和知识要在上下文压缩之前注入，否则可能被裁掉。
+
+---
+
+## 后续扩展（现在不做）
+
+- 接入 ChromaDB / Qdrant 等向量数据库（实现 `MemoryStore` / `KnowledgeStore` 即可）
+- 记忆衰减：根据 `last_accessed` 和 `access_count` 自动降权
+- 记忆合并：定期用 LLM 合并相似记忆
+- RAG rerank：检索后用 rerank 模型重新排序
+- 混合检索：向量 + BM25 关键词检索结合

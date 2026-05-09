@@ -5,6 +5,7 @@ from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
 from wuwei.llm import AgentEvent, LLMGateway
 from wuwei.runtime import AgentRunner
+from wuwei.skill.skill import SkillManager
 from wuwei.tools import Tool, ToolRegistry
 
 ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
@@ -73,10 +74,11 @@ class Agent(BaseSessionAgent):
             max_steps: int = 10,
             parallel_tool_calls: bool = False,
             hooks=None,
+            skill_manager=None,
             **llm_kwargs,
     ) -> "Agent":
         llm = LLMGateway.from_env(**llm_kwargs)
-        registry = ToolRegistry.from_builtin(builtin_tools)
+        registry = ToolRegistry.from_builtin(builtin_tools, skill_manager=skill_manager)
 
         for item in tools or []:
             if isinstance(item, Tool):

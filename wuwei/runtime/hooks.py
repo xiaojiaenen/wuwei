@@ -69,6 +69,11 @@ class RuntimeHook:
     ) -> None:
         pass
 
+    async def on_run_end(
+        self, session: AgentSession, result, *, task: Task | None = None
+    ) -> None:
+        pass
+
     async def on_task_start(self, session: AgentSession, task: Task) -> None:
         pass
 
@@ -137,6 +142,10 @@ class HookManager:
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in parameters.values()
         )
+
+    async def on_run_end(self, session, result, *, task=None) -> None:
+        for hook in self._hooks:
+            await hook.on_run_end(session, result, task=task)
 
     async def on_task_start(self, session, task) -> None:
         from wuwei.llm import AgentEvent

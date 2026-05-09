@@ -100,10 +100,11 @@ class PlanAgent(BaseSessionAgent):
         max_steps: int = 10,
         parallel_tool_calls: bool = False,
         hooks=None,
+        skill_manager=None,
         **llm_kwargs,
     ) -> "PlanAgent":
         llm = LLMGateway.from_env(**llm_kwargs)
-        registry = ToolRegistry.from_builtin(builtin_tools)
+        registry = ToolRegistry.from_builtin(builtin_tools, skill_manager=skill_manager)
 
         for item in tools or []:
             if isinstance(item, Tool):

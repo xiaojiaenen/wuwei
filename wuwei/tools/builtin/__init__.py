@@ -3,6 +3,7 @@ from .file_tools import register_file_tools
 from .git_tools import register_git_tools
 from .npm_tools import register_npm_tools
 from .python_tools import register_python_tools
+from .rag_tools import register_rag_tools
 from .skill_tools import register_skill_tools
 from .time_tools import register_time_tools
 
@@ -12,6 +13,7 @@ __all__ = [
     "register_git_tools",
     "register_npm_tools",
     "register_python_tools",
+    "register_rag_tools",
     "register_skill_tools",
     "register_time_tools",
 ]
@@ -24,4 +26,5 @@ BUILTIN_TOOL_REGISTRARS = {
     "npm": register_npm_tools,
     "python": register_python_tools,
     "skill": register_skill_tools,
+    "rag": register_rag_tools,
 }

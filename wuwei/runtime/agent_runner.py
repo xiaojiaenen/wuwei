@@ -296,6 +296,7 @@ class AgentRunner:
                     latency_ms=total_latency_ms,
                     llm_calls=llm_calls,
                 )
+                await self.hooks.on_run_end(self.session, None)
                 return
 
             limit_message = "任务未完成，已达到最大步骤限制。"
@@ -328,6 +329,7 @@ class AgentRunner:
             await self._emit_event(
                 "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
             )
+            await self.hooks.on_run_end(self.session, None)
             self._set_session_run_stats(
                 usage=total_usage,
                 latency_ms=total_latency_ms,
@@ -594,6 +596,7 @@ class AgentRunner:
                     run_id=run_id,
                     data=result.model_dump(),
                 )
+                await self.hooks.on_run_end(self.session, result)
                 return result
 
             limit_message = "任务未完成，已达到最大步骤限制。"
@@ -610,6 +613,7 @@ class AgentRunner:
                 run_id=run_id,
                 data={**result.model_dump(), "reason": "max_steps"},
             )
+            await self.hooks.on_run_end(self.session, result)
             return result
         except Exception as exc:
             self._set_session_run_stats(

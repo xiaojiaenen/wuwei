@@ -11,7 +11,9 @@ from wuwei.runtime.hitl import (
 )
 from wuwei.runtime.hitl_hook import HitlHook
 from wuwei.runtime.hooks import HookManager, RuntimeHook
+from wuwei.runtime.memory_hook import MemoryExtractionHook, MemoryRetrievalHook
 from wuwei.runtime.planner_executor_runner import PlannerExecutorRunner
+from wuwei.runtime.rag_hook import RagRetrievalHook
 from wuwei.runtime.skill_hook import SkillHook
 from wuwei.runtime.storage_hook import StorageHook
 
@@ -22,6 +24,9 @@ __all__ = [
     "HookManager",
     "ConsoleHook",
     "ContextCompressionHook",
+    "MemoryExtractionHook",
+    "MemoryRetrievalHook",
+    "RagRetrievalHook",
     "SkillHook",
     "StorageHook",
     "ApprovalDecision",
