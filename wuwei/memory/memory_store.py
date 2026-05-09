@@ -18,6 +18,23 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def decay_score(record: MemoryRecord, now: datetime | None = None) -> float:
+    """计算记忆的衰减分数。越低越应该被淘汰。
+
+    公式: importance * 0.9^天数 * log2(2 + access_count)
+    - 最近访问过的保持活跃
+    - 重要 + 被频繁访问的记忆不容易衰减
+    - 新创建但从未被访问的记忆按 created_at 计算天数
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    ref_time = record.last_accessed or record.created_at
+    if ref_time is None:
+        return record.importance
+    days = max(0, (now - ref_time).days)
+    return record.importance * (0.9 ** days) * math.log2(2 + record.access_count)
+
+
 class MemoryStore(Protocol):
     """长期记忆存储协议。"""
 
@@ -40,6 +57,10 @@ class MemoryStore(Protocol):
     async def delete(self, memory_id: str) -> None: ...
 
     async def list_all(self, *, namespace: str = "default") -> list[MemoryRecord]: ...
+
+    async def cleanup(
+        self, *, namespace: str = "default", threshold: float = 0.1
+    ) -> list[MemoryRecord]: ...
 
 
 class InMemoryMemoryStore:
@@ -118,3 +139,17 @@ class InMemoryMemoryStore:
 
     async def list_all(self, *, namespace: str = "default") -> list[MemoryRecord]:
         return [r for r in self._records.values() if r.namespace == namespace]
+
+    async def cleanup(
+        self, *, namespace: str = "default", threshold: float = 0.1
+    ) -> list[MemoryRecord]:
+        """清理衰减分数低于阈值的记忆，返回被删除的记录列表。"""
+        now = datetime.now(timezone.utc)
+        to_delete = [
+            r
+            for r in self._records.values()
+            if r.namespace == namespace and decay_score(r, now) < threshold
+        ]
+        for r in to_delete:
+            del self._records[r.id]
+        return to_delete

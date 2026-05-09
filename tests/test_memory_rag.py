@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import math
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from wuwei.memory.embedder import SimpleEmbedder
 from wuwei.memory.knowledge_store import InMemoryKnowledgeStore, _split_text
-from wuwei.memory.memory_store import InMemoryMemoryStore, _cosine_similarity
+from wuwei.memory.memory_store import InMemoryMemoryStore, _cosine_similarity, decay_score
 from wuwei.memory.memory_types import KnowledgeChunk, MemoryRecord
 from wuwei.runtime.hooks import HookManager, RuntimeHook
 from wuwei.runtime.memory_hook import MemoryExtractionHook, MemoryRetrievalHook
@@ -352,3 +353,112 @@ async def test_memory_extraction_hook_deduplicates():
     # 去重后应该还是只有 1 条
     records = await store.list_all()
     assert len(records) == 1
+
+
+# ── 记忆衰减 ──────────────────────────────────────────
+
+
+def test_decay_score_recent_high():
+    now = datetime.now(timezone.utc)
+    r = MemoryRecord(
+        id="1", content="test", importance=0.8,
+        created_at=now, last_accessed=now, access_count=5,
+    )
+    score = decay_score(r, now)
+    # 最近访问 + 高重要性 + 多次访问 → 高分
+    assert score > 0.5
+
+
+def test_decay_score_old_low():
+    now = datetime.now(timezone.utc)
+    r = MemoryRecord(
+        id="1", content="test", importance=0.3,
+        created_at=now - timedelta(days=60),
+        last_accessed=now - timedelta(days=60),
+        access_count=0,
+    )
+    score = decay_score(r, now)
+    # 60 天前访问 + 低重要性 + 从未被访问 → 低分
+    assert score < 0.1
+
+
+def test_decay_score_frequently_accessed_decays_slower():
+    now = datetime.now(timezone.utc)
+    base_time = now - timedelta(days=30)
+
+    r_frequent = MemoryRecord(
+        id="1", content="test", importance=0.5,
+        created_at=base_time, last_accessed=base_time, access_count=10,
+    )
+    r_rare = MemoryRecord(
+        id="2", content="test", importance=0.5,
+        created_at=base_time, last_accessed=base_time, access_count=0,
+    )
+    assert decay_score(r_frequent, now) > decay_score(r_rare, now)
+
+
+def test_decay_score_new_never_accessed_uses_created_at():
+    now = datetime.now(timezone.utc)
+    r = MemoryRecord(
+        id="1", content="test", importance=0.8,
+        created_at=now - timedelta(days=30),
+        last_accessed=None, access_count=0,
+    )
+    score = decay_score(r, now)
+    # 30 天前创建但从未访问，应该有明显衰减
+    assert 0 < score < 0.8
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_stale_memories():
+    now = datetime.now(timezone.utc)
+    store = InMemoryMemoryStore()
+
+    # 添加一条会过期的记忆
+    old = await store.add("过时的记忆", importance=0.2)
+    old.last_accessed = now - timedelta(days=60)
+    old.created_at = now - timedelta(days=60)
+
+    # 添加一条活跃的记忆
+    fresh = await store.add("活跃的记忆", importance=0.8)
+    fresh.last_accessed = now
+
+    deleted = await store.cleanup(threshold=0.1)
+    assert len(deleted) == 1
+    assert deleted[0].id == old.id
+
+    remaining = await store.list_all()
+    assert len(remaining) == 1
+    assert remaining[0].id == fresh.id
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_important_old_memories():
+    now = datetime.now(timezone.utc)
+    store = InMemoryMemoryStore()
+
+    # 高重要性 + 被频繁访问 → 即使较旧也不应删除
+    r = await store.add("重要记忆", importance=1.0)
+    r.last_accessed = now - timedelta(days=30)
+    r.access_count = 20
+
+    deleted = await store.cleanup(threshold=0.1)
+    assert len(deleted) == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_namespace_isolation():
+    now = datetime.now(timezone.utc)
+    store = InMemoryMemoryStore()
+
+    old = await store.add("过时记忆", namespace="ns1", importance=0.2)
+    old.last_accessed = now - timedelta(days=60)
+    old.created_at = now - timedelta(days=60)
+
+    # ns2 没有记忆，cleanup 不应影响 ns1
+    deleted = await store.cleanup(namespace="ns2", threshold=0.1)
+    assert len(deleted) == 0
+
+    # ns1 才能清理
+    deleted = await store.cleanup(namespace="ns1", threshold=0.1)
+    assert len(deleted) == 1
