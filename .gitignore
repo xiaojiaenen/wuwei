@@ -21,6 +21,10 @@ uv.lock
 .env
 .DS_Store
 
+# Claude Code
+.claude/
+CLAUDE.md
+
 # Example runtime output
 agent_notes.txt
 .wuwei_sessions/
