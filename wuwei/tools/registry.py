@@ -107,7 +107,13 @@ class ToolRegistry:
                         continue
 
                     # 推断参数类型
-                    param_type = type_hints.get(param_name, str).__name__
+                    raw_type = type_hints.get(param_name, str)
+                    # 处理 Union 类型（如 str | None），取第一个非 NoneType 的类型
+                    if hasattr(raw_type, "__args__"):
+                        # typing.Union 或 types.UnionType (Python 3.10+ X | Y)
+                        args = [a for a in raw_type.__args__ if a is not type(None)]
+                        raw_type = args[0] if args else str
+                    param_type = getattr(raw_type, "__name__", "string")
                     if param_type in ["int", "float", "complex"]:
                         param_type = "number"
                     elif param_type in {"bool"}:
