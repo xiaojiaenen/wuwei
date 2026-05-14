@@ -65,6 +65,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
     @registry.tool(
         name="list_skills",
         description="列出当前可用技能的摘要。先查看技能列表，再自行判断是否需要某个 skill。",
+        display_name="列出技能",
     )
     def list_skills() -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
@@ -84,6 +85,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
     @registry.tool(
         name="load_skill",
         description="根据技能名称加载技能正文。选中 skill 后再调用这个工具。",
+        display_name="加载技能",
     )
     def load_skill(skill_name: str) -> dict[str, object]:
         skill = skill_manager.get_skill(skill_name)
@@ -108,6 +110,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             "读取已加载 skill 的 references/ 目录中的单个参考文件。"
             "必须传入 load_skill 返回的 load_token；只在 skill 正文要求阅读参考资料时使用。"
         ),
+        display_name="加载技能参考",
     )
     def load_skill_reference(
         skill_name: str,
@@ -144,6 +147,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
         timeout_seconds=SKILL_SCRIPT_TIMEOUT_SECONDS + 1,
         side_effect=True,
         requires_approval=True,
+        display_name="运行技能脚本",
     )
     def run_skill_python_script(
         skill_name: str,

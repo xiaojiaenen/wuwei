@@ -48,6 +48,7 @@ def register_python_tools(registry: ToolRegistry) -> None:
         timeout_seconds=DEFAULT_TIMEOUT_SECONDS + 1,
         side_effect=True,
         requires_approval=True,
+        display_name="运行Python脚本",
     )
     def run_python_script(
         script_path: str,

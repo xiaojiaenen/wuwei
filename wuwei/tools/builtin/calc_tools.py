@@ -73,6 +73,7 @@ def register_calc_tools(registry: ToolRegistry) -> None:
             "安全计算数学表达式。支持 + - * / // % **、括号、常用 math 函数和常量，"
             "例如 sqrt(16)、sin(pi / 2)、round(10 / 3, 2)。"
         ),
+        display_name="数学计算",
     )
     def calculate(expression: str) -> dict:
         """计算数学表达式。

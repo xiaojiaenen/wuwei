@@ -10,6 +10,7 @@ def register_rag_tools(registry: ToolRegistry, *, knowledge_store: KnowledgeStor
     @registry.tool(
         name="ingest_document",
         description="将文档导入知识库。支持 txt/md 文件。导入后可用于 RAG 检索。",
+        display_name="导入文档",
     )
     async def ingest_document(file_path: str) -> dict:
         path = Path(file_path).resolve()
@@ -25,6 +26,7 @@ def register_rag_tools(registry: ToolRegistry, *, knowledge_store: KnowledgeStor
     @registry.tool(
         name="search_knowledge",
         description="从知识库中检索相关文档片段。",
+        display_name="搜索知识库",
     )
     async def search_knowledge(query: str, limit: int = 4) -> dict:
         chunks = await knowledge_store.search(query, limit=limit)

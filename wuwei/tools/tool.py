@@ -39,6 +39,7 @@ class Tool(BaseModel):
     parameters: ToolParameters
     handler: Callable[..., Any] | Callable[..., Awaitable[Any]]
     execution: ToolExecutionPolicy = Field(default_factory=ToolExecutionPolicy)
+    display_name: str | None = None
 
     def to_schema(self) -> dict[str, Any]:
         return {

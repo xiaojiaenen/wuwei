@@ -86,7 +86,7 @@ def _load_package_json(workspace: str) -> dict[str, Any]:
 
 
 def register_npm_tools(registry: ToolRegistry) -> None:
-    @registry.tool(name="npm_list_scripts", description="读取 package.json 中的 scripts 列表。")
+    @registry.tool(name="npm_list_scripts", description="读取 package.json 中的 scripts 列表。", display_name="列出npm脚本")
     def npm_list_scripts(workspace: str = ".") -> dict[str, Any]:
         """列出 npm scripts。
 
@@ -98,7 +98,7 @@ def register_npm_tools(registry: ToolRegistry) -> None:
             scripts = {}
         return {"ok": True, "scripts": scripts}
 
-    @registry.tool(name="npm_run_script", description="运行 package.json 中定义的 npm script。")
+    @registry.tool(name="npm_run_script", description="运行 package.json 中定义的 npm script。", display_name="运行npm脚本")
     def npm_run_script(
         script_name: str,
         args_json: str = "[]",
@@ -143,6 +143,7 @@ def register_npm_tools(registry: ToolRegistry) -> None:
         ),
         side_effect=True,
         requires_approval=True,
+        display_name="安装npm包",
     )
     def npm_install_package(
         package: str,

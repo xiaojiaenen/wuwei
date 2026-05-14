@@ -86,6 +86,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         description=(
             "将文件转换为 markdown供大模型阅读，支持常见文本文件、pptx,docx,xlsx,xls,pdf 等。"
         ),
+        display_name="文件转Markdown",
     )
     def file_to_md(path: str):
         try:
@@ -100,6 +101,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="read_text_file",
         description="读取 workspace 内的文本文件内容。默认最多返回 20000 字符。",
+        display_name="读取文本文件",
     )
     def read_text_file(
         path: str, max_chars: int = DEFAULT_READ_LIMIT, workspace: str = "."
@@ -129,6 +131,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         description="写入 workspace 内的文本文件。默认不覆盖已有文件，overwrite=true 时才覆盖。",
         side_effect=True,
         requires_approval=True,
+        display_name="写入文本文件",
     )
     def write_text_file(
         path: str,
@@ -158,6 +161,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         description="向 workspace 内的文本文件末尾追加内容，文件不存在时会创建。",
         side_effect=True,
         requires_approval=True,
+        display_name="追加文本文件",
     )
     def append_text_file(path: str, content: str, workspace: str = ".") -> dict:
         """追加文本文件。
@@ -180,6 +184,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         description="修改 workspace 内文本文件：把 old_text 替换为 new_text。",
         side_effect=True,
         requires_approval=True,
+        display_name="替换文件内容",
     )
     def replace_text_in_file(
         path: str,
@@ -222,6 +227,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         description="删除 workspace 内的单个文件。只删除文件，不删除目录。",
         side_effect=True,
         requires_approval=True,
+        display_name="删除文件",
     )
     def delete_file(path: str, workspace: str = ".") -> dict:
         """删除文件。
@@ -241,6 +247,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
     @registry.tool(
         name="list_files",
         description="列出 workspace 内指定目录下的文件和子目录（默认递归 3 层，最多返回 200 项）。",
+        display_name="列出文件",
     )
     def list_files(
         path: str = ".",

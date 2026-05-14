@@ -57,6 +57,7 @@ class ToolRegistry:
         side_effect: bool = False,
         requires_approval: bool = False,
         retry_policy: ToolRetryPolicy | None = None,
+        display_name: str | None = None,
     ) -> Tool:
         tool_name = name or func.__name__
         self.tool(
@@ -68,6 +69,7 @@ class ToolRegistry:
             side_effect=side_effect,
             requires_approval=requires_approval,
             retry_policy=retry_policy,
+            display_name=display_name,
         )(func)
 
         tool = self.get(tool_name)
@@ -85,6 +87,7 @@ class ToolRegistry:
         side_effect: bool = False,
         requires_approval: bool = False,
         retry_policy: ToolRetryPolicy | None = None,
+        display_name: str | None = None,
     ):
         def decorator(func: Callable[..., Any] | Callable[..., Awaitable[Any]]):
             tool_name = name or func.__name__
@@ -155,6 +158,7 @@ class ToolRegistry:
                         requires_approval=requires_approval,
                         retry_policy=retry_policy or ToolRetryPolicy(),
                     ),
+                    display_name=display_name,
                 )
             )
             return func
