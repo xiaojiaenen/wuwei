@@ -221,12 +221,14 @@ class AgentRunner:
 
                 if full_tool_calls:
                     for tool_call in full_tool_calls:
+                        tool = self.tool_executor.registry.get(tool_call.function.name)
                         event = self._build_event(
                             "tool_start",
                             step=step_count,
                             run_id=run_id,
                             data={
                                 "tool_name": tool_call.function.name,
+                                "display_name": tool.display_name if tool else None,
                                 "args": tool_call.function.arguments,
                                 "tool_call_id": tool_call.id,
                             },
@@ -387,6 +389,7 @@ class AgentRunner:
             run_id=run_id,
             data={
                 "tool_name": tool_call.function.name,
+                "display_name": tool.display_name if tool else None,
                 "args": tool_call.function.arguments,
                 "tool_call_id": tool_call.id,
                 "side_effect": bool(tool and tool.execution.side_effect),
@@ -431,8 +434,10 @@ class AgentRunner:
         step: int,
         run_id: str | None,
     ) -> None:
+        tool = self.tool_executor.registry.get(tool_call.function.name)
         data = {
             "tool_name": tool_call.function.name,
+            "display_name": tool.display_name if tool else None,
             "tool_call_id": tool_call.id,
             "output": tool_message.content,
         }
