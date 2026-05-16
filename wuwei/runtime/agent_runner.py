@@ -397,32 +397,40 @@ class AgentRunner:
             },
         )
         try:
-            await self.hooks.before_tool(self.session, tool_call, step=step, task=task, tool=tool)
-        except ToolApprovalRejected as exc:
+            try:
+                await self.hooks.before_tool(self.session, tool_call, step=step, task=task, tool=tool)
+            except ToolApprovalRejected as exc:
+                tool_message = self._build_tool_error_message(
+                    tool_call,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                    metadata={
+                        "tool_executed": False,
+                        "instruction": (
+                            "The human rejected this tool call. The tool was not executed. "
+                            "Do not claim the action succeeded; tell the user it was not completed."
+                        ),
+                    },
+                )
+                await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
+                return tool_message
+
+            tool_message = await self.tool_executor.execute_one(tool_call)
+            await self.hooks.after_tool(
+                self.session,
+                tool_call,
+                tool_message,
+                step=step,
+                task=task,
+                tool=tool,
+            )
+        except Exception as exc:
             tool_message = self._build_tool_error_message(
                 tool_call,
                 error_type=type(exc).__name__,
                 message=str(exc),
-                metadata={
-                    "tool_executed": False,
-                    "instruction": (
-                        "The human rejected this tool call. The tool was not executed. "
-                        "Do not claim the action succeeded; tell the user it was not completed."
-                    ),
-                },
             )
-            await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
-            return tool_message
 
-        tool_message = await self.tool_executor.execute_one(tool_call)
-        await self.hooks.after_tool(
-            self.session,
-            tool_call,
-            tool_message,
-            step=step,
-            task=task,
-            tool=tool,
-        )
         await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
         return tool_message
 
