@@ -6,6 +6,9 @@ from .python_tools import register_python_tools
 from .rag_tools import register_rag_tools
 from .skill_tools import register_skill_tools
 from .time_tools import register_time_tools
+from .json_tools import JSON_TOOLS
+from .http_tools import HTTP_TOOLS
+from .text_tools import TEXT_TOOLS
 
 __all__ = [
     "register_calc_tools",
@@ -16,6 +19,9 @@ __all__ = [
     "register_rag_tools",
     "register_skill_tools",
     "register_time_tools",
+    "JSON_TOOLS",
+    "HTTP_TOOLS",
+    "TEXT_TOOLS",
 ]
 
 BUILTIN_TOOL_REGISTRARS = {
@@ -27,4 +33,7 @@ BUILTIN_TOOL_REGISTRARS = {
     "python": register_python_tools,
     "skill": register_skill_tools,
     "rag": register_rag_tools,
+    "json": lambda registry: [registry.register(t) for t in JSON_TOOLS],
+    "http": lambda registry: [registry.register(t) for t in HTTP_TOOLS],
+    "text": lambda registry: [registry.register(t) for t in TEXT_TOOLS],
 }

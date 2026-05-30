@@ -2,6 +2,7 @@ from wuwei.agent.agent import Agent
 from wuwei.agent.base import BaseAgent, BaseSessionAgent
 from wuwei.agent.plan_agent import PlanAgent
 from wuwei.agent.session import AgentSession
+from wuwei.agent.multi_agent import Swarm, TeamMember, SubTask
 from wuwei.runtime import AgentRunner, PlannerExecutorRunner
 
 __all__ = [
@@ -12,4 +13,7 @@ __all__ = [
     "BaseSessionAgent",
     "PlanAgent",
     "PlannerExecutorRunner",
+    "Swarm",
+    "TeamMember",
+    "SubTask",
 ]
