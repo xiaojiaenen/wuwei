@@ -4,32 +4,52 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwei"
-version = "1.0.3"
+version = "2.0.0-alpha.1"
 description = "Wuwei - 无为而治的 AI 智能体框架"
 authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
-license = "Apache-2.0"                         # 改为简单字符串（SPDX 表达式）
+license = "Apache-2.0"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11"
 dependencies = [
-    "markitdown[pptx,docx,xlsx,xls,pdf]>=0.1.5",
-    "openai>=1.0.0",                           # 最新稳定版是 1.x，2.x 不存在
+    "openai>=1.0.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.3",
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "httpx>=0.25.0",
 ]
 
 [project.optional-dependencies]
+# LLM 提供商
+anthropic = ["anthropic>=0.20"]
+zhipu = []  # 使用 openai 兼容模式
+dashscope = []  # 使用 openai 兼容模式
+ollama = []  # 使用 httpx
+
+# 扩展模块
+graph = []  # 状态图编排
+middleware = []  # 中间件系统
+mcp = ["mcp>=1.0"]  # MCP 支持
+skill = ["python-frontmatter>=1.0"]  # 技能系统
+gateway = ["httpx>=0.25"]  # 多平台网关
+memory = []  # 记忆系统
+observability = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+]
+sandbox = []  # 沙箱执行
+
+# 完整安装
+all = [
+    "wuwei[anthropic,zhipu,dashscope,ollama]",
+    "wuwei[graph,middleware,mcp,skill,gateway,memory,observability,sandbox]",
+]
+
+# 开发依赖
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
-    "black>=23.0",
-    "ruff>=0.0.280",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
 ]
 
 [project.urls]
