@@ -12,18 +12,19 @@ uv.lock
 
 # Local environment files and dependency locks
 .env
-uv.lock
 
 # IDE
 .idea/
 
 # Local environment / OS files
-.env
 .DS_Store
 
 # Claude Code
 .claude/
 CLAUDE.md
+
+# MkDocs build output
+site/
 
 # Example runtime output
 agent_notes.txt
