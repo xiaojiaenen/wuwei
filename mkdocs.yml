@@ -1,0 +1,148 @@
+site_name: Wuwei
+site_description: 无为而治的 AI Agent 框架
+site_url: https://xiaojiaenen.github.io/wuwei
+repo_url: https://github.com/xiaojiaenen/wuwei
+repo_name: xiaojiaenen/wuwei
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: wuwei-dark
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: 切换到亮色模式
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: 切换到暗色模式
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/brain
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - toc.follow
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/xiaojiaenen/wuwei
+  generator: false
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_bases: true
+            show_root_heading: true
+            heading_level: 3
+            members_order: source
+
+nav:
+  - 首页: index.md
+  - 快速开始:
+    - 安装: getting-started/installation.md
+    - 快速上手: getting-started/quickstart.md
+    - 配置: getting-started/configuration.md
+  - 核心概念:
+    - 架构总览: core/architecture.md
+    - Agent: core/agent.md
+    - Session: core/session.md
+    - PlanAgent: core/plan-agent.md
+    - Hook 系统: core/hooks.md
+  - 工具系统:
+    - 概览: tools/overview.md
+    - 内置工具: tools/builtin.md
+    - 自定义工具: tools/custom.md
+  - 记忆与上下文:
+    - Context: memory/context.md
+    - 滑动窗口: memory/context-window.md
+    - 上下文压缩: memory/compression.md
+    - 持久化存储: memory/storage.md
+  - 任务规划:
+    - 概览: planning/overview.md
+    - DAG 任务图: planning/task-dag.md
+  - 技能系统:
+    - 概览: skill/overview.md
+    - 编写技能: skill/authoring.md
+  - 人工审批:
+    - HITL: hitl/overview.md
+  - API 参考:
+    - 模块索引: api/reference.md
+  - 示例:
+    - 最小示例: examples/minimal.md
+    - 会话示例: examples/session.md
+    - 规划示例: examples/plan-agent.md
+  - 更新日志: changelog.md

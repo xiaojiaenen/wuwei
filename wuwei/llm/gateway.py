@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Union
 
-from .adapters import OpenAIAdapter
+from .adapters import OpenAIAdapter, AnthropicAdapter, ZhipuAdapter, DashScopeAdapter, OllamaAdapter
 from .adapters.base import BaseAdapter
 from .types import FunctionCall, LLMResponse, LLMResponseChunk, Message, ToolCall
 from ..tools import Tool
@@ -17,14 +17,22 @@ class LLMGateway:
     _DEFAULT_ENV_PREFIX = "OPENAI"
 
     def __init__(self, config: dict[str, Any]):
-        """根据显式配置初始化模型网关。"""
+        """根据显式配置初始化模型网关。
+
+        支持的 provider:
+        - openai: OpenAI GPT 系列
+        - anthropic: Anthropic Claude 系列
+        - zhipu: 智谱 AI GLM-4 系列
+        - dashscope: 阿里云通义千问系列
+        - ollama: 本地模型（通过 Ollama）
+        """
         self.adapter: BaseAdapter
         provider = config.get("provider", "openai")
 
         if provider == "openai":
             adapter_kwargs = {
                 "api_key": config["api_key"],
-                "model": config.get("model", "gpt-5.4"),
+                "model": config.get("model", "gpt-4o"),
                 "temperature": config.get("temperature", 0.2),
                 "max_tokens": config.get("max_tokens", 4096),
             }
@@ -34,8 +42,49 @@ class LLMGateway:
                 adapter_kwargs["extra_body"] = config["extra_body"]
 
             self.adapter = OpenAIAdapter(**adapter_kwargs)
+
+        elif provider == "anthropic":
+            adapter_kwargs = {
+                "api_key": config["api_key"],
+                "model": config.get("model", "claude-sonnet-4-6"),
+                "temperature": config.get("temperature", 0.2),
+                "max_tokens": config.get("max_tokens", 4096),
+            }
+            self.adapter = AnthropicAdapter(**adapter_kwargs)
+
+        elif provider == "zhipu":
+            adapter_kwargs = {
+                "api_key": config["api_key"],
+                "model": config.get("model", "glm-4"),
+                "temperature": config.get("temperature", 0.2),
+                "max_tokens": config.get("max_tokens", 4096),
+            }
+            if config.get("base_url"):
+                adapter_kwargs["base_url"] = config["base_url"]
+            self.adapter = ZhipuAdapter(**adapter_kwargs)
+
+        elif provider == "dashscope":
+            adapter_kwargs = {
+                "api_key": config["api_key"],
+                "model": config.get("model", "qwen-max"),
+                "temperature": config.get("temperature", 0.2),
+                "max_tokens": config.get("max_tokens", 4096),
+            }
+            if config.get("base_url"):
+                adapter_kwargs["base_url"] = config["base_url"]
+            self.adapter = DashScopeAdapter(**adapter_kwargs)
+
+        elif provider == "ollama":
+            adapter_kwargs = {
+                "model": config.get("model", "llama3"),
+                "base_url": config.get("base_url", "http://localhost:11434"),
+                "temperature": config.get("temperature", 0.2),
+                "max_tokens": config.get("max_tokens", 4096),
+            }
+            self.adapter = OllamaAdapter(**adapter_kwargs)
+
         else:
-            raise ValueError(f"Unsupported provider: {provider}")
+            raise ValueError(f"不支持的 provider: {provider}")
 
         self.retry_policy = config.get("retry", {"max_attempts": 3})
         self.timeout = config.get("timeout", 60)
@@ -44,6 +93,7 @@ class LLMGateway:
     def from_env(
         cls,
         *,
+        provider: str | None = None,
         env_prefix: str | None = None,
         env_file: str | None = None,
         base_url: str | None = None,
@@ -53,20 +103,44 @@ class LLMGateway:
         """
         从环境变量创建 LLMGateway。
 
-        这个方法只保留少量高频参数：
-        - `env_prefix`：决定读取哪组环境变量，默认是 `OPENAI`
-        - `env_file`：显式指定 env 文件
-        - `model` / `base_url`：作为显式覆盖值
+        支持的 provider：
+        - openai: 环境变量前缀 OPENAI_（默认）
+        - anthropic: 环境变量前缀 ANTHROPIC_
+        - zhipu: 环境变量前缀 ZHIPU_
+        - dashscope: 环境变量前缀 DASHSCOPE_
+        - ollama: 环境变量前缀 OLLAMA_
 
         环境变量命名固定为：
         - `{PREFIX}_API_KEY`
         - `{PREFIX}_BASE_URL`
         - `{PREFIX}_MODEL`
-
-        框架内部会自动在当前目录和最多 3 层父目录中查找 `.env` / `env`，
-        这部分不再暴露给用户配置，保持接口简单。
         """
-        prefix = (env_prefix or cls._DEFAULT_ENV_PREFIX).upper()
+        # 自动检测 provider
+        if not provider:
+            # 根据环境变量前缀自动检测
+            if env_prefix:
+                provider = env_prefix.lower()
+            elif os.getenv("ANTHROPIC_API_KEY"):
+                provider = "anthropic"
+            elif os.getenv("ZHIPU_API_KEY"):
+                provider = "zhipu"
+            elif os.getenv("DASHSCOPE_API_KEY"):
+                provider = "dashscope"
+            else:
+                provider = "openai"
+
+        # 设置默认前缀
+        if not env_prefix:
+            prefix_map = {
+                "openai": "OPENAI",
+                "anthropic": "ANTHROPIC",
+                "zhipu": "ZHIPU",
+                "dashscope": "DASHSCOPE",
+                "ollama": "OLLAMA",
+            }
+            env_prefix = prefix_map.get(provider, "OPENAI")
+
+        prefix = env_prefix.upper()
         api_key_env = f"{prefix}_API_KEY"
         base_url_env = f"{prefix}_BASE_URL"
         model_env = f"{prefix}_MODEL"
@@ -74,12 +148,14 @@ class LLMGateway:
         file_values = cls._load_env_file(env_file=env_file)
 
         api_key = os.getenv(api_key_env) or file_values.get(api_key_env)
-        if not api_key:
-            raise ValueError(f"Missing required environment variable: {api_key_env}")
+
+        # Ollama 不需要 API key
+        if not api_key and provider != "ollama":
+            raise ValueError(f"缺少环境变量: {api_key_env}")
 
         env_config: dict[str, Any] = {
-            "provider": "openai",
-            "api_key": api_key,
+            "provider": provider,
+            "api_key": api_key or "ollama",
         }
 
         resolved_base_url = base_url or os.getenv(base_url_env) or file_values.get(base_url_env)

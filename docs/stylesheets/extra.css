@@ -1,0 +1,607 @@
+/* ============================================================
+   Wuwei Documentation — Custom Styles
+   Dark developer aesthetic inspired by Linear/Vercel/Stripe
+   ============================================================ */
+
+/* --- CSS Variables --- */
+:root {
+  --wuwei-purple: #6366f1;
+  --wuwei-purple-light: #818cf8;
+  --wuwei-purple-dark: #4f46e5;
+  --wuwei-cyan: #22d3ee;
+  --wuwei-cyan-dark: #06b6d4;
+  --wuwei-emerald: #34d399;
+  --wuwei-amber: #fbbf24;
+  --wuwei-rose: #fb7185;
+  --wuwei-orange: #fb923c;
+  --wuwei-bg: #06060b;
+  --wuwei-bg-card: rgba(255, 255, 255, 0.02);
+  --wuwei-border: rgba(255, 255, 255, 0.06);
+  --wuwei-text: #e4e4e7;
+  --wuwei-text-muted: #71717a;
+  --wuwei-text-dim: #52525b;
+}
+
+/* --- Dark Theme Color Override --- */
+[data-md-color-scheme="wuwei-dark"] {
+  --md-default-bg-color: var(--wuwei-bg);
+  --md-default-fg-color: var(--wuwei-text);
+  --md-default-fg-color--light: #a1a1aa;
+  --md-default-fg-color--lighter: var(--wuwei-text-muted);
+  --md-primary-fg-color: var(--wuwei-purple);
+  --md-primary-fg-color--light: var(--wuwei-purple-light);
+  --md-primary-bg-color: var(--wuwei-bg);
+  --md-accent-fg-color: var(--wuwei-cyan);
+  --md-code-bg-color: #0c0c14;
+  --md-code-fg-color: var(--wuwei-text);
+  --md-typeset-a-color: var(--wuwei-purple-light);
+  --md-typeset-color: var(--wuwei-text);
+}
+
+/* --- Global Typography --- */
+.md-typeset {
+  font-weight: 400;
+  line-height: 1.8;
+  letter-spacing: -0.01em;
+}
+
+.md-typeset h1 {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-size: 2.4rem;
+  margin-bottom: 1rem;
+}
+
+.md-typeset h2 {
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin-top: 3rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.12);
+}
+
+.md-typeset h3 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 2rem;
+}
+
+.md-typeset h4 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+/* --- Hero Section (index.md) --- */
+.hero-section {
+  text-align: center;
+  padding: 5rem 1.5rem 3rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.hero-section::before {
+  content: '';
+  position: absolute;
+  top: -40%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 900px;
+  height: 900px;
+  background: radial-gradient(ellipse, rgba(99, 102, 241, 0.15) 0%, rgba(34, 211, 238, 0.05) 40%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  animation: heroGlow 8s ease-in-out infinite alternate;
+}
+
+@keyframes heroGlow {
+  0% { opacity: 0.7; transform: translateX(-50%) scale(1); }
+  100% { opacity: 1; transform: translateX(-50%) scale(1.1); }
+}
+
+.hero-section > * {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-section h1 {
+  font-size: 4.5rem;
+  font-weight: 900;
+  letter-spacing: -0.06em;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, #a5b4fc, #818cf8, #22d3ee);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradientShift 6s ease infinite;
+}
+
+@keyframes gradientShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.hero-section .hero-subtitle {
+  font-size: 1.3rem;
+  color: var(--wuwei-text-muted);
+  max-width: 650px;
+  margin: 0 auto 2rem;
+  line-height: 1.9;
+}
+
+.hero-section .hero-badge {
+  display: inline-block;
+  padding: 0.4rem 1.2rem;
+  border-radius: 9999px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--wuwei-purple-light);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  margin-bottom: 1.5rem;
+  backdrop-filter: blur(10px);
+}
+
+.hero-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 2.5rem;
+  flex-wrap: wrap;
+}
+
+.hero-buttons a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 2rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.hero-buttons .btn-primary {
+  background: linear-gradient(135deg, var(--wuwei-purple), var(--wuwei-purple-dark));
+  color: #fff;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+
+.hero-buttons .btn-primary:hover {
+  box-shadow: 0 8px 30px rgba(99, 102, 241, 0.5), inset 0 1px 0 rgba(255,255,255,0.15);
+  transform: translateY(-2px);
+}
+
+.hero-buttons .btn-secondary {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--wuwei-text);
+  border: 1px solid var(--wuwei-border);
+  backdrop-filter: blur(10px);
+}
+
+.hero-buttons .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+
+/* --- Feature Grid --- */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+  margin: 3rem 0;
+}
+
+.feature-card {
+  padding: 2rem;
+  border-radius: 14px;
+  background: var(--wuwei-bg-card);
+  border: 1px solid var(--wuwei-border);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.feature-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.3), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.feature-card:hover {
+  background: rgba(99, 102, 241, 0.04);
+  border-color: rgba(99, 102, 241, 0.12);
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(99, 102, 241, 0.08);
+}
+
+.feature-card:hover::before {
+  opacity: 1;
+}
+
+.feature-card .feature-icon {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+  display: block;
+}
+
+.feature-card h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 0.6rem;
+  color: var(--wuwei-text);
+  letter-spacing: -0.02em;
+}
+
+.feature-card p {
+  font-size: 0.88rem;
+  color: var(--wuwei-text-muted);
+  line-height: 1.75;
+  margin: 0;
+}
+
+/* --- Feature Grid Colors --- */
+.feature-card.card-purple { border-top: 2px solid var(--wuwei-purple); }
+.feature-card.card-cyan { border-top: 2px solid var(--wuwei-cyan); }
+.feature-card.card-emerald { border-top: 2px solid var(--wuwei-emerald); }
+.feature-card.card-amber { border-top: 2px solid var(--wuwei-amber); }
+.feature-card.card-rose { border-top: 2px solid var(--wuwei-rose); }
+.feature-card.card-orange { border-top: 2px solid var(--wuwei-orange); }
+
+/* --- Code Blocks --- */
+.md-typeset code {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.82em;
+  border-radius: 6px;
+  padding: 0.15em 0.4em;
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset code {
+  background: rgba(99, 102, 241, 0.06);
+  color: #c4b5fd;
+}
+
+.md-typeset pre > code {
+  border-radius: 12px;
+  font-size: 0.82rem;
+  line-height: 1.7;
+  padding: 1.25rem 1.5rem;
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset pre {
+  background: #0a0a14;
+  border: 1px solid rgba(99, 102, 241, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* --- Admonitions --- */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset .admonition {
+  background: rgba(99, 102, 241, 0.03);
+}
+
+.md-typeset .admonition-title {
+  border-radius: 12px 12px 0 0;
+  font-weight: 600;
+}
+
+/* --- Tabs --- */
+.md-typeset .tabbed-set > input:checked + label {
+  border-bottom-color: var(--wuwei-purple);
+  color: var(--wuwei-purple-light);
+}
+
+.md-typeset .tabbed-content {
+  border-radius: 0 12px 12px 12px;
+}
+
+/* --- Navigation --- */
+[data-md-color-scheme="wuwei-dark"] .md-nav__link {
+  color: #a1a1aa;
+  transition: color 0.2s;
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-nav__link:hover {
+  color: var(--wuwei-purple-light);
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-nav__link--active {
+  color: var(--wuwei-purple-light);
+  font-weight: 600;
+}
+
+/* --- Scrollbar --- */
+[data-md-color-scheme="wuwei-dark"] ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+[data-md-color-scheme="wuwei-dark"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-md-color-scheme="wuwei-dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.15);
+  border-radius: 3px;
+}
+
+[data-md-color-scheme="wuwei-dark"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.3);
+}
+
+/* --- Mermaid Diagrams --- */
+.mermaid {
+  text-align: center;
+  margin: 2rem 0;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  border-radius: 12px;
+}
+
+/* --- Quick Start Steps --- */
+.step-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.25rem;
+  margin: 2.5rem 0;
+}
+
+.step-card {
+  padding: 1.75rem;
+  border-radius: 12px;
+  background: var(--wuwei-bg-card);
+  border: 1px solid var(--wuwei-border);
+  position: relative;
+  transition: all 0.3s;
+}
+
+.step-card:hover {
+  border-color: rgba(99, 102, 241, 0.12);
+  transform: translateY(-2px);
+}
+
+.step-card .step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--wuwei-purple), var(--wuwei-purple-dark));
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+}
+
+.step-card h4 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.01em;
+}
+
+.step-card p {
+  font-size: 0.85rem;
+  color: var(--wuwei-text-muted);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* --- Stats Row --- */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.25rem;
+  margin: 3rem 0;
+  padding: 2rem 0;
+  border-top: 1px solid var(--wuwei-border);
+  border-bottom: 1px solid var(--wuwei-border);
+}
+
+.stat-item {
+  text-align: center;
+}
+
+.stat-item .stat-number {
+  font-size: 2.5rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  background: linear-gradient(135deg, var(--wuwei-purple-light), var(--wuwei-cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.stat-item .stat-label {
+  font-size: 0.85rem;
+  color: var(--wuwei-text-muted);
+  margin-top: 0.25rem;
+}
+
+/* --- Tech Stack Row --- */
+.tech-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1.5rem 0;
+  justify-content: center;
+}
+
+.tech-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 1rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: rgba(99, 102, 241, 0.06);
+  color: var(--wuwei-purple-light);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+/* --- Table Styling --- */
+[data-md-color-scheme="wuwei-dark"] .md-typeset table:not([class]) {
+  background: var(--wuwei-bg-card);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--wuwei-border);
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset table:not([class]) th {
+  background: rgba(99, 102, 241, 0.05);
+  color: #c4b5fd;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset table:not([class]) td {
+  border-color: var(--wuwei-border);
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset table:not([class]) tr:hover {
+  background: rgba(99, 102, 241, 0.02);
+}
+
+/* --- Section Divider --- */
+.section-divider {
+  text-align: center;
+  margin: 4rem 0;
+  position: relative;
+}
+
+.section-divider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--wuwei-border), transparent);
+}
+
+.section-divider span {
+  position: relative;
+  background: var(--wuwei-bg);
+  padding: 0 1.5rem;
+  color: var(--wuwei-text-dim);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* --- Architecture Diagram Container --- */
+.arch-diagram {
+  background: #020617;
+  border-radius: 14px;
+  padding: 2rem;
+  margin: 2rem 0;
+  border: 1px solid rgba(99, 102, 241, 0.08);
+  overflow-x: auto;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+}
+
+/* --- Responsive --- */
+@media screen and (max-width: 76.1875em) {
+  .hero-section h1 {
+    font-size: 3rem;
+  }
+  
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .step-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media screen and (max-width: 48em) {
+  .hero-section h1 {
+    font-size: 2.5rem;
+  }
+  
+  .hero-section {
+    padding: 3rem 1rem 2rem;
+  }
+  
+  .feature-grid,
+  .step-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .stats-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* --- Smooth Transitions --- */
+.md-nav__link,
+.feature-card,
+.hero-buttons a,
+.step-card,
+.tech-badge {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* --- Content Spacing --- */
+.md-typeset .content-container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* --- Inline Code Highlight --- */
+[data-md-color-scheme="wuwei-dark"] .md-typeset a code {
+  color: var(--wuwei-purple-light);
+  border-bottom: 1px dashed rgba(99, 102, 241, 0.3);
+}
+
+[data-md-color-scheme="wuwei-dark"] .md-typeset a:hover code {
+  border-bottom-color: var(--wuwei-purple-light);
+}
+
+/* --- Footer --- */
+[data-md-color-scheme="wuwei-dark"] .md-footer {
+  background: #050508;
+  border-top: 1px solid var(--wuwei-border);
+}
+
+/* --- Header --- */
+[data-md-color-scheme="wuwei-dark"] .md-header {
+  background: rgba(6, 6, 11, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* --- Source Link --- */
+.md-typeset .md-content__icon {
+  color: var(--wuwei-text-dim);
+}
+
+/* --- Highlighted Lines --- */
+[data-md-color-scheme="wuwei-dark"] .md-typeset .highlight .hll {
+  background: rgba(99, 102, 241, 0.1);
+  border-left: 3px solid var(--wuwei-purple);
+}
