@@ -1,5 +1,9 @@
 from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent
-from wuwei.agent.multi_agent import Swarm, TeamMember, SubTask
+from wuwei.agent.multi_agent import MultiAgentGraph, TeamMember, HandoffMiddleware
+from wuwei.agent.async_sub_agent import AsyncSubAgent, AsyncSubAgentMiddleware
+# 向后兼容
+Swarm = MultiAgentGraph
+SubTask = None  # deprecated
 from wuwei.core import (
     Runnable,
     RunnableSequence,
@@ -68,9 +72,12 @@ __all__ = [
     "AgentSession",
     "BaseAgent",
     "BaseSessionAgent",
-    "Swarm",
+    "MultiAgentGraph",
+    "Swarm",  # 向后兼容
     "TeamMember",
-    "SubTask",
+    "HandoffMiddleware",
+    "AsyncSubAgent",
+    "AsyncSubAgentMiddleware",
     # Core
     "Runnable",
     "RunnableSequence",

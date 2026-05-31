@@ -238,16 +238,18 @@ class TestMultiAgent:
     """多 Agent 协作测试"""
 
     def test_swarm_imports(self):
-        """测试 Swarm 导入"""
-        from wuwei.agent import Swarm, TeamMember, SubTask
+        """测试 MultiAgent 导入"""
+        from wuwei.agent import MultiAgentGraph, TeamMember, HandoffMiddleware
+        from wuwei.agent.async_sub_agent import AsyncSubAgent, AsyncSubAgentMiddleware
+        assert MultiAgentGraph is not None
+        assert AsyncSubAgent is not None
 
-    def test_subtask(self):
-        """测试 SubTask"""
-        from wuwei.agent import SubTask
-
-        task = SubTask(id=1, description="test task")
-        assert task.id == 1
-        assert task.status == "pending"
+    def test_team_member(self):
+        """测试 TeamMember 数据模型"""
+        from wuwei.agent.multi_agent import TeamMember
+        member = TeamMember(name="test", agent=None, role="tester")
+        assert member.name == "test"
+        assert member.role == "tester"
 
 
 class TestBuiltinTools:

@@ -1046,27 +1046,25 @@ def test_event_system():
 
 
 def test_swarm():
-    """测试 Swarm / TeamMember / SubTask 数据模型"""
-    from wuwei.agent.multi_agent import Swarm, TeamMember, SubTask
-
-    # SubTask
-    st = SubTask(id=1, description="Research AI trends", assigned_to="researcher")
-    assert st.status == "pending"
-    st.status = "in_progress"
-    st.result = "Found 3 key trends"
-    st.status = "completed"
+    """测试 MultiAgentGraph / TeamMember 数据模型"""
+    from wuwei.agent.multi_agent import MultiAgentGraph, TeamMember
 
     # TeamMember
     tm = TeamMember(
         name="researcher",
-        agent=None,  # Agent 可以为 None 用于测试
+        agent=None,
         role="Research specialist",
         tools=["search", "fetch"],
     )
     assert tm.name == "researcher"
     assert len(tm.tools) == 2
 
-    print("  ✅ Swarm: SubTask + TeamMember 数据模型 通过")
+    # MultiAgentGraph
+    graph = MultiAgentGraph()
+    graph.add_worker("test-worker", None, role="tester")
+    assert "test-worker" in graph.members
+
+    print("  ✅ MultiAgent: TeamMember + MultiAgentGraph 数据模型 通过")
 
 
 # ═══════════════════════════════════════════════════════════════════
