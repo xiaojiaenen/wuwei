@@ -59,6 +59,7 @@ class BaseMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     role: str
     content: str = ""
+    reasoning_content: Optional[str] = None  # 支持 reasoning_content
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: dict = Field(default_factory=dict)
 

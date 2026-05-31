@@ -2,24 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
-class FunctionCall(BaseModel):
-    name: str
-    arguments: dict[str, Any]
-
-
-class ToolCall(BaseModel):
-    id: str
-    type: Literal["function"]
-    function: FunctionCall
-
-
-class Message(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
-    reasoning_content: str | None = None
-    tool_calls: list[ToolCall] | None = None
-    tool_call_id: str | None = None
+# 从 core.message 导入统一的消息类型
+from wuwei.core.message import BaseMessage as Message, FunctionCall, ToolCall
 
 
 class LLMResponse(BaseModel):
