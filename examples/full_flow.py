@@ -9,28 +9,24 @@ Wuwei Agent 框架完整流程示例。
 - Skill 体系：
     FileSystemSkillProvider  从文件系统扫描 SKILL.md
     SkillManager             聚合多个 SkillProvider
-    SkillHook                注入 skill 使用指引到 system prompt
+    SkillMiddleware           注入 skill 使用指引到 system prompt
     skill 工具                list_skills / load_skill / run_skill_python_script
-- RuntimeHook 体系：
-    SkillHook            注入 skill 使用指引
-    ContextCompressionHook  历史压缩 + 滑动窗口 + 内存裁剪
-    StorageHook           对话持久化（增量追加）
-    HitlHook              人类审批（save_note 需确认）
-    ConsoleHook           调试日志
+- Middleware 体系：
+    SkillMiddleware        注入 skill 使用指引
+    LoggingMiddleware      调试日志
+    HitlMiddleware         人类审批（save_note 需确认）
+    StorageMiddleware      对话持久化（增量追加）
 - FileStorage           文件存储（meta.json + jsonl）
 
 流程：
   用户输入 → Agent.stream_events
     → AgentRunner 执行循环：
-      1. copy context → before_llm hooks:
-           SkillHook: 注入 skill 使用指引到 system prompt
-           ContextCompressionHook: 超阈值则压缩旧轮次、裁剪内存
-           StorageHook(step=0): 存 meta + user msg
-           HitlHook: 透传（before_llm 无逻辑）
-           ConsoleHook: 打印调用日志
+      1. copy context → before_llm middleware:
+           SkillMiddleware: 注入 skill 使用指引到 system prompt
+           LoggingMiddleware: 打印调用日志
       2. LLM 调用（可能触发 list_skills → load_skill → run_skill_python_script）
-      3. 流式结束后触发 after_ai_message → StorageHook 持久化完整 AI 回复
-      4. 若有 tool_calls → before_tool/after_tool hooks（审批/持久化工具结果）
+      3. 流式结束后触发 after_ai_message → StorageMiddleware 持久化完整 AI 回复
+      4. 若有 tool_calls → before_tool/after_tool middleware（审批/持久化工具结果）
       5. 重复直到 finish_reason=stop 或达到 max_steps
     → 返回结构化事件流
 """
@@ -43,19 +39,16 @@ from pathlib import Path
 from wuwei import (
     Agent,
     AgentSession,
-    ConsoleHook,
-    ContextCompressionHook,
     FileStorage,
     FileSystemSkillProvider,
-    HitlHook,
     LLMGateway,
-    SkillHook,
+    LoggingMiddleware,
+    MiddlewareStack,
     SkillManager,
-    StorageHook,
     ToolRegistry,
 )
-from wuwei.runtime import ApprovalPolicy, ConsoleApprovalProvider
-from wuwei.memory.context_compressor import LLMContextCompressor
+from wuwei.middleware import HitlMiddleware, StorageMiddleware, SkillMiddleware
+from wuwei.skill import SkillViewerTool
 from wuwei.tools.builtin.skill_tools import register_skill_tools
 
 # ── 配置 ──────────────────────────────────────────────
@@ -101,34 +94,28 @@ def create_agent() -> Agent:
     # 4. 持久化存储
     storage = FileStorage(STORAGE_ROOT)
 
-    # 5. Hook 链（按注册顺序依次执行 before_* / after_*）
-    hooks = [
-        # 5a. Skill 钩子：注入 skill 使用指引到 system prompt（需在最前面）
-        SkillHook(),
-        # 5b. 上下文压缩：超过 16 轮触发摘要，内存保留最近 4 轮
-        ContextCompressionHook(
-            compressor=LLMContextCompressor(llm),
-            compress_after_turns=16,
-            keep_recent_turns=4,
-        ),
-        # 5c. 持久化：每条消息即时落盘
-        #     非流式 assistant 走 after_llm；流式 assistant 走 after_ai_message。
-        StorageHook(storage),
-        # 5d. HITL 审批：save_note 需人类确认
-        HitlHook(
-            provider=ConsoleApprovalProvider(),
-            policy=ApprovalPolicy(require_approval_tools={"save_note"}),
-        ),
-        # 5e. 调试日志
-        ConsoleHook(),
-    ]
+    # 5. 中间件栈（按注册顺序依次执行 before_* / after_*）
+    middleware = MiddlewareStack()
+    # 5a. Skill 中间件：注入 skill 使用指引到 system prompt
+    middleware.add(SkillMiddleware(skill_manager=skill_manager))
+    # 5b. 存储中间件：每条消息即时落盘
+    middleware.add(StorageMiddleware())
+    # 5c. HITL 中间件：save_note 需人类确认
+    async def approval_provider(tool_call):
+        if tool_call.function.name == "save_note":
+            print(f"是否允许保存笔记？(y/n)")
+            return input().lower() == "y"
+        return True
+    middleware.add(HitlMiddleware(approval_provider=approval_provider))
+    # 5d. 调试日志
+    middleware.add(LoggingMiddleware())
 
     return Agent(
         llm=llm,
         tools=tools,
         default_system_prompt="你是一个简洁可靠的命令行助手。",
         default_max_steps=8,
-        hooks=hooks,
+        middleware=middleware,
     )
 
 

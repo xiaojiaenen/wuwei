@@ -5,7 +5,7 @@ from pathlib import Path
 
 from wuwei.agent import Agent
 from wuwei.llm import LLMGateway
-from wuwei.runtime import ApprovalPolicy, ConsoleApprovalProvider, HitlHook
+from wuwei.middleware import MiddlewareStack, HitlMiddleware
 from wuwei.tools import ToolRegistry
 
 
@@ -30,6 +30,18 @@ def create_agent() -> Agent:
     tools = ToolRegistry.from_builtin(["time"])
     tools.register_callable(save_note)
 
+    # 创建中间件栈
+    middleware = MiddlewareStack()
+
+    # HITL 中间件：save_note 需人类确认
+    async def approval_provider(tool_call):
+        if tool_call.function.name == "save_note":
+            print(f"是否允许保存笔记？(y/n)")
+            return input().lower() == "y"
+        return True
+
+    middleware.add(HitlMiddleware(approval_provider=approval_provider))
+
     return Agent(
         llm=llm,
         tools=tools,
@@ -39,12 +51,7 @@ def create_agent() -> Agent:
             "如果工具返回 ok=false，或者工具结果说明人工拒绝、未执行、未完成，"
             "必须明确告诉用户操作没有完成，不要声称已经记录或已经执行。"
         ),
-        hooks=[
-            HitlHook(
-                provider=ConsoleApprovalProvider(),
-                policy=ApprovalPolicy(require_approval_tools={"save_note"}),
-            )
-        ],
+        middleware=middleware,
     )
 
 
