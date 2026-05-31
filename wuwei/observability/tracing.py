@@ -27,10 +27,18 @@ class TracingMiddleware(Middleware):
         try:
             from opentelemetry import trace
             from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import (
+                ConsoleSpanExporter,
+                SimpleSpanProcessor,
+            )
 
             provider = TracerProvider()
+            # 添加 Console exporter，span 数据输出到 stdout
+            exporter = ConsoleSpanExporter()
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
             trace.set_tracer_provider(provider)
             self._tracer = trace.get_tracer(service_name)
+            logger.info(f"[{service_name}] OpenTelemetry tracing enabled (console exporter)")
         except ImportError:
             logger.debug(
                 "OpenTelemetry 未安装，使用日志追踪"

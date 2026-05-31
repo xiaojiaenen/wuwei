@@ -31,11 +31,11 @@ class TelegramGateway(BaseGateway):
 
     async def start(self):
         """启动网关"""
-        pass
+        self._running = True
 
     async def stop(self):
         """停止网关"""
-        pass
+        self._running = False
 
     async def send_message(self, user_id: str, content: str, **kwargs):
         """发送消息"""

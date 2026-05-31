@@ -30,13 +30,12 @@ class WeChatGateway(BaseGateway):
         self.webhook_url = webhook_url
 
     async def start(self):
-        """启动网关"""
-        # Webhook 模式下不需要主动监听
-        pass
+        """启动网关 — Webhook 模式标记运行中"""
+        self._running = True
 
     async def stop(self):
         """停止网关"""
-        pass
+        self._running = False
 
     async def send_message(self, user_id: str, content: str, **kwargs):
         """发送消息"""

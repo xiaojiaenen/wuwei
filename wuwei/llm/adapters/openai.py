@@ -9,7 +9,7 @@ from ...tools import Tool
 
 
 class OpenAIAdapter(BaseAdapter):
-    def __init__(self,api_key:str,model:str|None="gpt-5.4",base_url:str|None="https://api.openai.com/v1",**kwargs):
+    def __init__(self,api_key:str,model:str|None="gpt-4o",base_url:str|None="https://api.openai.com/v1",**kwargs):
         self.client=AsyncOpenAI(api_key=api_key,base_url=base_url)
         self.model = model
         self.default_params = kwargs

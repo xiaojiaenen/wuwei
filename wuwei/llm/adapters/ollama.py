@@ -51,7 +51,10 @@ class OllamaAdapter(BaseAdapter):
         }
 
         if tools:
-            request["tools"] = tools
+            request["tools"] = [
+                tool.to_schema() if hasattr(tool, 'to_schema') else tool
+                for tool in tools
+            ]
 
         return request
 

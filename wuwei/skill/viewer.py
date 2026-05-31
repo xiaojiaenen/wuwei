@@ -1,5 +1,7 @@
 """SkillViewer 工具"""
 
+from typing import Any
+
 from wuwei.tools.base import Tool
 from wuwei.skill.skill import SkillManager
 
@@ -10,7 +12,10 @@ class SkillViewerTool(Tool):
     Agent 可以通过此工具查看技能的详细内容和使用说明。
     """
 
-    def __init__(self, skill_manager: SkillManager):
+    # Pydantic model_config 允许额外字段
+    model_config = {"arbitrary_types_allowed": True}
+
+    def __init__(self, skill_manager: SkillManager, **data):
         super().__init__(
             name="view_skill",
             description="查看指定技能的详细内容和使用说明",
@@ -25,15 +30,18 @@ class SkillViewerTool(Tool):
                 "required": ["skill_name"],
             },
             handler=self._view_skill,
+            **data,
         )
-        self.skill_manager = skill_manager
+        # 使用 object.__setattr__ 绕过 Pydantic 字段校验
+        object.__setattr__(self, 'skill_manager', skill_manager)
 
     async def _view_skill(self, skill_name: str) -> str:
         """查看技能内容"""
+        mgr = object.__getattribute__(self, 'skill_manager')
         try:
-            skill = self.skill_manager.get_skill(skill_name)
+            skill = mgr.get_skill(skill_name)
         except ValueError:
-            available = ", ".join(self.skill_manager.list_names())
+            available = ", ".join(mgr.list_names())
             return f"技能 '{skill_name}' 不存在。可用技能：{available}"
 
         # 构建技能信息

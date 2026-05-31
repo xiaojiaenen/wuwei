@@ -62,12 +62,15 @@ class DingTalkGateway(BaseGateway):
             return self._access_token
 
     async def start(self):
-        """启动网关"""
-        pass
+        """启动网关 — 初始化 token 并标记为运行中"""
+        await self._get_access_token()
+        self._running = True
 
     async def stop(self):
-        """停止网关"""
-        pass
+        """停止网关 — 清理资源"""
+        self._running = False
+        self._access_token = None
+        self._token_expires = 0
 
     async def send_message(self, user_id: str, content: str, **kwargs):
         """发送消息"""
