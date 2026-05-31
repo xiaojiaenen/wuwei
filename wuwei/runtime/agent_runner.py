@@ -442,7 +442,8 @@ class AgentRunner:
         context.add_user_message(user_input)
 
         try:
-            while True:
+            step_count = 0
+            while step_count < self.session.max_steps:
                 messages = self._copy_messages()
                 tools = list(self.tools)
 
@@ -461,21 +462,22 @@ class AgentRunner:
                 self._merge_usage(total_usage, response.usage)
 
                 ai_message = context.add_ai_message(
-                    response.content,
-                    tool_calls=response.tool_calls,
+                    response.message.content,
+                    tool_calls=response.message.tool_calls or [],
                 )
 
-                if response.tool_calls:
+                if response.message.tool_calls:
                     tool_messages = await self._execute_tool_calls(
-                        response.tool_calls,
-                        step=llm_calls,
+                        response.message.tool_calls,
+                        step=step_count,
                         task=task,
                     )
                     self._append_tool_messages(tool_messages)
+                    step_count += 1
                 else:
                     latency_ms = int((time.monotonic() - start_time) * 1000)
                     return self._build_run_result(
-                        content=response.content,
+                        content=response.message.content or "",
                         usage=total_usage,
                         latency_ms=latency_ms,
                         llm_calls=llm_calls,

@@ -117,10 +117,11 @@ class MemoryMiddleware(Middleware):
             import json
             try:
                 # 尝试从响应中提取 JSON
-                start = response.content.find("[")
-                end = response.content.rfind("]") + 1
+                content = response.message.content or ""
+                start = content.find("[")
+                end = content.rfind("]") + 1
                 if start != -1 and end != 0:
-                    memories = json.loads(response.content[start:end])
+                    memories = json.loads(content[start:end])
 
                     # 存储记忆
                     for memory in memories:

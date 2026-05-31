@@ -59,7 +59,7 @@ class OpenAIAdapter(BaseAdapter):
         choice = raw_response.choices[0]
         message = choice.message
 
-        tool_calls = None
+        tool_calls = []
         if message.tool_calls:
             tool_calls = [
                 ToolCall(

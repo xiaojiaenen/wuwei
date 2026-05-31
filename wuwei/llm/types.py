@@ -17,7 +17,7 @@ class LLMResponse(BaseModel):
 class LLMResponseChunk(BaseModel):
     content: str
     reasoning_content: str | None = None
-    tool_calls_delta: list[dict[str, Any]] | str = (
+    tool_calls_delta: list[dict[str, Any]] | str | None = (
         None  # 每个元素的格式：{"index": int, "id": str, "name": str, "arguments": str}
     )
     tool_calls_complete: list[ToolCall] | None = None

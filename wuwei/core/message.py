@@ -62,6 +62,7 @@ class BaseMessage(BaseModel):
     reasoning_content: Optional[str] = None
     tool_calls: list[ToolCall] = Field(default_factory=list)  # 所有消息都有 tool_calls
     tool_call_id: Optional[str] = None
+    name: Optional[str] = None  # 工具消息的工具名
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: dict = Field(default_factory=dict)
 

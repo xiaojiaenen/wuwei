@@ -48,6 +48,7 @@ class ToolExecutor:
                     role="tool",
                     tool_call_id=tool_call.id,
                     content=content,
+                    name=tool_call.function.name,
                 )
             except Exception as exc:
                 last_exception = exc
@@ -101,6 +102,7 @@ class ToolExecutor:
             role="tool",
             tool_call_id=tool_call.id,
             content=json.dumps(payload, ensure_ascii=False),
+            name=tool_call.function.name,
         )
 
     def serialize_output(self, output: Any) -> str:

@@ -68,5 +68,8 @@ class Context:
         """从 dict 反序列化。"""
         ctx = cls()
         for m in data.get("messages", []):
+            # 兼容旧数据中 tool_calls: null 的情况
+            if m.get("tool_calls") is None:
+                m["tool_calls"] = []
             ctx._messages.append(Message.model_validate(m))
         return ctx

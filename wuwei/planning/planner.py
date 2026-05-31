@@ -67,7 +67,7 @@ class Planner:
             stream=False,
             response_format={"type": "json_object"},
         )
-        self.last_usage = dict(response.usage)
+        self.last_usage = dict(response.usage) if response.usage else {}
         self.last_latency_ms = response.latency_ms
         self.last_llm_calls = 1
         content = response.message.content
