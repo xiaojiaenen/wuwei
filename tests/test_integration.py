@@ -593,4 +593,7 @@ print(f"📊 集成测试结果: ✅ {PASSED} passed  ❌ {FAILED} failed  (共 
 print("=" * 60)
 
 if FAILED > 0:
+    print("\n⚠️  Some checks FAILED!")
     sys.exit(1)
+else:
+    print("\n🎉 All integration checks passed!")
