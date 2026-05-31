@@ -47,7 +47,10 @@ class OpenAIAdapter(BaseAdapter):
         if stream and "stream_options" not in request:
             request["stream_options"] = {"include_usage": True}
         if tools:
-            request["tools"] = [tool.to_schema() for tool in tools]
+            request["tools"] = [
+                tool.to_schema() if hasattr(tool, 'to_schema') else tool
+                for tool in tools
+            ]
 
         return request
 
@@ -75,7 +78,7 @@ class OpenAIAdapter(BaseAdapter):
 
         internal_msg = Message(
             role="assistant",
-            content=message.content,
+            content=message.content or "",
             reasoning_content=self._get_extra_field(message, "reasoning_content"),
             tool_calls=tool_calls,
         )

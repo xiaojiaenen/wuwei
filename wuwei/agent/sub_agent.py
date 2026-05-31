@@ -109,10 +109,63 @@ class SubAgentMiddleware(Middleware):
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """注入子代理工具到可用工具列表
 
-        注意：实际工具注入通过 tools 列表完成，
-        这里作为 before_llm 钩子参与中间件生命周期。
+        将子代理工具 schema 写入 ctx.metadata，
+        上层调用者 (AgentRunner.agent_node) 应读取并合并到 tools 列表。
         """
+        ctx.metadata["_sub_agent_tools"] = self.get_task_tools()
         return ctx
+
+    async def wrap_model_call(
+        self,
+        ctx: MiddlewareContext,
+        messages: list[Any],
+        tools: list[Any],
+        next_handler: Any,
+    ) -> Any:
+        """包装 LLM 调用，注入子代理工具 schema
+
+        将 task_{name} 工具 schema 追加到 tools 列表，
+        使 LLM 可以调用子代理。
+        """
+        sub_schemas = self.get_task_tools()
+        return await next_handler(messages, list(tools) + sub_schemas)
+
+    async def before_tool(
+        self,
+        ctx: MiddlewareContext,
+        tool_call: Any,
+    ) -> Any:
+        """拦截 task_* 工具调用
+
+        如果 LLM 调用了 task_{sub_agent_name}，
+        拦截执行，由子代理处理并返回结果。
+        """
+        tool_name = tool_call.function.name if hasattr(tool_call, 'function') else getattr(tool_call, 'name', '')
+        if not tool_name.startswith("task_"):
+            return tool_call  # 不是子代理工具，放行
+
+        # 获取原始 tool_call_id
+        tc_id = tool_call.id if hasattr(tool_call, 'id') else getattr(tool_call, 'tool_call_id', '')
+        
+        # 执行子代理，结果直接写入 state.messages
+        result_msg = await self.handle_task_tool(
+            tool_name=tool_name,
+            arguments=tool_call.function.arguments if hasattr(tool_call, 'function') else {},
+            ctx=ctx,
+        )
+        # 确保 tool_call_id 匹配 LLM 的 tool call
+        if hasattr(result_msg, 'tool_call_id'):
+            result_msg.tool_call_id = tc_id
+        elif isinstance(result_msg, dict):
+            result_msg['tool_call_id'] = tc_id
+        
+        # 将子代理结果写入状态，供 LLM 在下一轮看到
+        if hasattr(ctx.state, 'add_message'):
+            ctx.state.add_message(result_msg)
+        elif hasattr(ctx.state, 'messages'):
+            ctx.state.messages.append(result_msg)
+        # 返回 None 表示拦截，AgentRunner 会跳过该工具的执行
+        return None
 
     def get_task_tools(self) -> list[dict]:
         """获取所有子代理的工具 schema"""
@@ -157,7 +210,7 @@ class SubAgentMiddleware(Middleware):
 
         return ToolMessage(
             content=result,
-            tool_call_id="",
+            tool_call_id=tool_name,  # placeholder, will be overridden by caller
             name=tool_name,
         )
 
