@@ -1,4 +1,5 @@
 from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent, PlanAgent
+from wuwei.agent.agent_v2 import Agent as AgentV2
 from wuwei.core import (
     Runnable,
     RunnableSequence,
@@ -35,19 +36,9 @@ from wuwei.memory import (
     SimpleEmbedder,
     Storage,
 )
+from wuwei.middleware import Middleware, MiddlewareContext, MiddlewareStack
 from wuwei.planning import Planner, PlanRunResult, Task, TaskList
-from wuwei.runtime import (
-    AgentRunner,
-    ConsoleHook,
-    ContextCompressionHook,
-    HitlHook,
-    MemoryExtractionHook,
-    MemoryRetrievalHook,
-    PlannerExecutorRunner,
-    RagRetrievalHook,
-    SkillHook,
-    StorageHook,
-)
+from wuwei.runtime import AgentRunner, PlannerExecutorRunner
 from wuwei.skill.fs_provider import FileSystemSkillProvider
 from wuwei.skill.skill import Skill, SkillManager, SkillProvider
 from wuwei.tools import (
@@ -63,6 +54,7 @@ from wuwei.tools.base import tool
 __all__ = [
     # Agent
     "Agent",
+    "AgentV2",
     "AgentRunner",
     "AgentSession",
     "BaseAgent",
@@ -97,25 +89,20 @@ __all__ = [
     "InMemoryMemoryStore",
     "KnowledgeChunk",
     "KnowledgeStore",
-    "MemoryExtractionHook",
     "MemoryRecord",
-    "MemoryRetrievalHook",
     "MemoryStore",
     "SimpleEmbedder",
     "Storage",
+    # Middleware
+    "Middleware",
+    "MiddlewareContext",
+    "MiddlewareStack",
     # Planning
     "Planner",
     "PlanRunResult",
     "PlannerExecutorRunner",
     "Task",
     "TaskList",
-    # Runtime
-    "ConsoleHook",
-    "ContextCompressionHook",
-    "HitlHook",
-    "RagRetrievalHook",
-    "SkillHook",
-    "StorageHook",
     # Skill
     "Skill",
     "SkillManager",
