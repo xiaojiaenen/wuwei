@@ -2,8 +2,8 @@
 
 from typing import Optional
 from wuwei.middleware.base import Middleware, MiddlewareContext
-from wuwei.core.message import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from wuwei.llm.gateway import LLMGateway
+from wuwei.llm.types import Message
 
 
 class ContextCompressionMiddleware(Middleware):
@@ -67,7 +67,7 @@ class ContextCompressionMiddleware(Middleware):
 
         return ctx
 
-    async def _compress_context(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+    async def _compress_context(self, messages: list) -> list:
         """压缩上下文"""
         if len(messages) <= self.keep_recent:
             return messages
@@ -80,14 +80,15 @@ class ContextCompressionMiddleware(Middleware):
         # 生成摘要
         if old_messages:
             summary = await self._generate_summary(old_messages)
-            summary_message = HumanMessage(
-                content=f"对话摘要：\n{summary}"
+            summary_message = Message(
+                role="user",
+                content=f"对话摘要：\n{summary}",
             )
             return system_messages + [summary_message] + new_messages
 
         return messages
 
-    async def _generate_summary(self, messages: list[BaseMessage]) -> str:
+    async def _generate_summary(self, messages: list) -> str:
         """生成对话摘要"""
         # 构建摘要提示词
         conversation = "\n".join(
@@ -104,7 +105,7 @@ class ContextCompressionMiddleware(Middleware):
 
         try:
             response = await self.llm.generate(
-                messages=[BaseMessage(role="user", content=prompt)],
+                messages=[Message(role="user", content=prompt)],
             )
             return response.content
         except Exception:
