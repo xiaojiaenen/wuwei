@@ -30,7 +30,7 @@ class Context:
             role="assistant",
             content=content,
             reasoning_content=reasoning_content,
-            tool_calls=tool_calls,
+            tool_calls=tool_calls or [],  # None 转为空列表
         )
         self._messages.append(message)
         return message
