@@ -3,8 +3,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from wuwei.graph.state import State
+
 from wuwei.core.message import AIMessage, ToolCall, ToolMessage
+from wuwei.graph.state import State
 
 
 @dataclass
@@ -83,3 +84,36 @@ class Middleware(ABC):
         返回 None 表示已处理，否则继续抛出。
         """
         return error
+
+    async def wrap_model_call(
+        self,
+        ctx: MiddlewareContext,
+        messages: list[Any],
+        tools: list[Any],
+        next_handler: Any,
+    ) -> Any:
+        """包装 LLM 调用（洋葱模型）
+
+        借鉴 DeepAgents 的 wrap_model_call 模式。
+        中间件可以在 LLM 调用前后注入逻辑：
+        - 修改 system prompt（注入 skill 定义、memory 等）
+        - 过滤工具列表
+        - 添加 Anthropic cache_control
+        - 后处理响应
+
+        使用方式：
+            async def wrap_model_call(self, ctx, messages, tools, next_handler):
+                # 前置处理
+                messages = self._inject_context(messages)
+                # 调用下一个中间件（或实际 LLM）
+                response = await next_handler(messages, tools)
+                # 后置处理
+                return response
+
+        Args:
+            ctx: 中间件上下文
+            messages: 消息列表
+            tools: 工具列表
+            next_handler: 下一层处理函数 async (messages, tools) -> response
+        """
+        return await next_handler(messages, tools)

@@ -40,6 +40,12 @@ class Tool(BaseModel):
     handler: Callable[..., Any] | Callable[..., Awaitable[Any]]
     execution: ToolExecutionPolicy = Field(default_factory=ToolExecutionPolicy)
     display_name: str | None = None
+    is_concurrency_safe: bool = True
+    """是否可以在同一批次中与其他工具并发执行。
+
+    设为 False 的工具会串行执行。
+    读写文件的工具如果路径可能重叠，应设为 False。
+    """
 
     def to_schema(self) -> dict[str, Any]:
         return {

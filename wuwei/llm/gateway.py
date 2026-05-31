@@ -88,6 +88,12 @@ class LLMGateway:
 
         self.retry_policy = config.get("retry", {"max_attempts": 3})
         self.timeout = config.get("timeout", 60)
+        self._fallback_adapter: BaseAdapter | None = None
+
+        # 配置 fallback 链
+        fallback_config = config.get("fallback")
+        if fallback_config:
+            self._fallback_adapter = self._create_fallback_adapter(fallback_config)
 
     @classmethod
     def from_env(
@@ -235,7 +241,17 @@ class LLMGateway:
         tools: list[Tool] | None,
         **kwargs,
     ) -> LLMResponse:
-        """发送一次非流式请求。"""
+        """发送一次非流式请求。
+
+        分类重试策略：
+        - 429 Rate Limit → 指数退避，使用 retry-after header
+        - 5xx Server Error → 指数退避
+        - 4xx (except 429) → 不重试（客户端错误）
+        - Timeout → 指数退避
+        - Connection Error → 指数退避
+
+        如果配置了 fallback 链，在耗尽重试后会尝试 fallback。
+        """
         request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
         start = time.monotonic()
         last_exception = None
@@ -246,14 +262,95 @@ class LLMGateway:
                 response = self.adapter.parse_response(raw)
                 response.latency_ms = int((time.monotonic() - start) * 1000)
                 return response
+            except asyncio.TimeoutError as exc:
+                last_exception = exc
+                wait_time = 2 ** attempt
+                if attempt < self.retry_policy["max_attempts"] - 1:
+                    await asyncio.sleep(wait_time)
+                    continue
             except Exception as exc:
                 last_exception = exc
-                if attempt == self.retry_policy["max_attempts"] - 1:
+                error_str = str(exc).lower()
+
+                # 429 — 可重试
+                if "429" in error_str or "rate limit" in error_str:
+                    if attempt < self.retry_policy["max_attempts"] - 1:
+                        wait_time = min(2 ** (attempt + 1), 60)  # cap at 60s for rate limits
+                        await asyncio.sleep(wait_time)
+                        continue
+                # 5xx — 可重试
+                elif any(f"{code}" in error_str for code in ["500", "502", "503", "504"]):
+                    if attempt < self.retry_policy["max_attempts"] - 1:
+                        wait_time = 2 ** attempt
+                        await asyncio.sleep(wait_time)
+                        continue
+                # 4xx (except 429) — 不可重试
+                elif any(f"{code}" in error_str for code in ["400", "401", "403", "404"]):
                     raise
-                wait_time = 2**attempt
-                await asyncio.sleep(wait_time)
+                # 连接错误 — 可重试
+                elif "connection" in error_str or "timeout" in error_str:
+                    if attempt < self.retry_policy["max_attempts"] - 1:
+                        wait_time = 2 ** attempt
+                        await asyncio.sleep(wait_time)
+                        continue
+                else:
+                    # 未知错误也重试几次
+                    if attempt < self.retry_policy["max_attempts"] - 1:
+                        wait_time = 2 ** attempt
+                        await asyncio.sleep(wait_time)
+                        continue
+
+        # 尝试 fallback
+        if self._fallback_adapter and last_exception:
+            try:
+                fallback_request = self._fallback_adapter.build_request(
+                    messages=messages, tools=tools, stream=False, **kwargs
+                )
+                raw = await asyncio.wait_for(
+                    self._fallback_adapter.call(fallback_request),
+                    timeout=self.timeout,
+                )
+                response = self._fallback_adapter.parse_response(raw)
+                response.latency_ms = int((time.monotonic() - start) * 1000)
+                return response
+            except Exception:
+                pass
 
         raise last_exception
+
+    def _create_fallback_adapter(self, config: dict) -> "BaseAdapter":
+        """创建 fallback 适配器"""
+        provider = config.get("provider", "openai")
+
+        if provider == "openai":
+            return OpenAIAdapter(
+                api_key=config["api_key"],
+                model=config.get("model", "gpt-4o-mini"),
+                temperature=config.get("temperature", 0.2),
+                max_tokens=config.get("max_tokens", 4096),
+                base_url=config.get("base_url"),
+                **{k: v for k, v in config.items() if k not in ("provider", "api_key", "model", "temperature", "max_tokens", "base_url")},
+            )
+        elif provider == "anthropic":
+            return AnthropicAdapter(
+                api_key=config["api_key"],
+                model=config.get("model", "claude-sonnet-4-6"),
+                temperature=config.get("temperature", 0.2),
+                max_tokens=config.get("max_tokens", 4096),
+            )
+        elif provider == "ollama":
+            return OllamaAdapter(
+                model=config.get("model", "llama3"),
+                base_url=config.get("base_url", "http://localhost:11434"),
+                temperature=config.get("temperature", 0.2),
+                max_tokens=config.get("max_tokens", 4096),
+            )
+        else:
+            raise ValueError(f"Unsupported fallback provider: {provider}")
+
+    def set_fallback(self, fallback_gateway: "LLMGateway") -> None:
+        """设置 fallback LLM 网关"""
+        self._fallback_adapter = fallback_gateway.adapter
 
     async def _generate_stream(
         self,

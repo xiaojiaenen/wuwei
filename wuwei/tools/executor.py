@@ -18,13 +18,84 @@ class ToolExecutor:
         tool_calls: list[ToolCall],
         concurrent: bool = False,
     ) -> list[Message]:
+        """执行工具调用列表
+
+        当 concurrent=True 时：
+        - 按 is_concurrency_safe 分组
+        - 安全组并发执行
+        - 非安全组保持顺序串行执行
+
+        借鉴 AgentScope 的 _batch_tool_calls 设计。
+        """
+        if not tool_calls:
+            return []
+
         if concurrent and len(tool_calls) > 1:
-            return await asyncio.gather(*(self.execute_one(tool_call) for tool_call in tool_calls))
+            return await self._execute_batched(tool_calls)
 
         results: list[Message] = []
         for tool_call in tool_calls:
             results.append(await self.execute_one(tool_call))
         return results
+
+    async def _execute_batched(
+        self,
+        tool_calls: list[ToolCall],
+    ) -> list[Message]:
+        """按 concurrency_safe 分批次并发执行
+
+        策略：
+        1. 扫描 tool_calls，将连续安全工具分组
+        2. 遇到非安全工具时，等待前面批次完成后再执行
+        3. 安全工具使用 asyncio.gather 并发
+        4. 结果按原始顺序排列
+        """
+        # 收集工具对象以检测 concurrency_safe
+        results: list[Message | None] = [None] * len(tool_calls)
+
+        i = 0
+        while i < len(tool_calls):
+            tc = tool_calls[i]
+            tool = self.registry.get(tc.function.name)
+            is_safe = tool.is_concurrency_safe if tool else True
+
+            if is_safe:
+                # 收集连续的 concurrency-safe 工具
+                batch = [tc]
+                batch_indices = [i]
+                j = i + 1
+                while j < len(tool_calls):
+                    next_tc = tool_calls[j]
+                    next_tool = self.registry.get(next_tc.function.name)
+                    if next_tool and next_tool.is_concurrency_safe:
+                        batch.append(next_tc)
+                        batch_indices.append(j)
+                        j += 1
+                    else:
+                        break
+
+                # 并发执行批次
+                batch_results = await asyncio.gather(
+                    *(self.execute_one(tc) for tc in batch),
+                    return_exceptions=True,
+                )
+                for idx, result in zip(batch_indices, batch_results):
+                    if isinstance(result, Exception):
+                        results[idx] = self.build_error_message(
+                            tool_calls[idx],
+                            error_type=type(result).__name__,
+                            message=str(result),
+                        )
+                    else:
+                        results[idx] = result
+
+                i = j
+            else:
+                # 串行执行非安全工具
+                results[i] = await self.execute_one(tc)
+                i += 1
+
+        return [r for r in results if r is not None]
 
     async def execute_one(self, tool_call: ToolCall) -> Message:
         tool = self.registry.get(tool_call.function.name)
