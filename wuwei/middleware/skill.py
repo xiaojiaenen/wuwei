@@ -3,12 +3,17 @@
 from wuwei.middleware.base import Middleware, MiddlewareContext
 from wuwei.core.message import SystemMessage
 from wuwei.skill.skill import SkillManager
+from wuwei.tools.base import Tool
+from wuwei.tools.builtin.skill_tools import register_skill_tools
 
 
 class SkillMiddleware(Middleware):
     """技能中间件
 
-    将技能使用指引注入到系统提示词。
+    整合技能指引注入和工具注册。
+    一个入口完成两件事：
+    1. 注入技能指引到系统提示词
+    2. 提供技能工具列表供 Agent 注册
 
     示例：
         from wuwei.skill import SkillManager, FileSystemSkillProvider
@@ -16,6 +21,12 @@ class SkillMiddleware(Middleware):
         provider = FileSystemSkillProvider("skills/")
         manager = SkillManager([provider])
         middleware = SkillMiddleware(skill_manager=manager)
+
+        agent = Agent(
+            llm=llm,
+            tools=middleware.get_tools(),  # 自动注册技能工具
+            middleware=MiddlewareStack([middleware]),
+        )
     """
 
     def __init__(self, skill_manager: SkillManager):
@@ -25,6 +36,16 @@ class SkillMiddleware(Middleware):
         """
         self.skill_manager = skill_manager
         self._injected = False
+        self._tools: list[Tool] | None = None
+
+    def get_tools(self) -> list[Tool]:
+        """获取技能工具列表（懒加载）"""
+        if self._tools is None:
+            from wuwei.tools.registry import ToolRegistry
+            registry = ToolRegistry()
+            register_skill_tools(registry, self.skill_manager)
+            self._tools = registry.list_tools()
+        return self._tools
 
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """LLM 调用前注入技能指引"""
