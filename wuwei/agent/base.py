@@ -1,10 +1,12 @@
+"""新的 BaseAgent - 使用 Middleware 替代 Hook"""
+
 from abc import ABC, abstractmethod
 from typing import Any
 from uuid import uuid4
 
 from wuwei.agent.session import AgentSession
 from wuwei.llm import LLMGateway
-from wuwei.runtime.hooks import HookManager, RuntimeHook
+from wuwei.middleware.stack import MiddlewareStack
 from wuwei.tools import Tool, ToolExecutor, ToolRegistry
 
 
@@ -18,12 +20,7 @@ class BaseAgent(ABC):
 
 class BaseSessionAgent(BaseAgent):
     """
-    带会话能力的公共基类。
-
-    这个类负责收敛 Agent 和 PlanAgent 里重复的公共逻辑：
-    - llm / tools / tool_executor 初始化
-    - 默认 system_prompt / max_steps / parallel_tool_calls
-    - session 的创建与复用
+    带会话能力的公共基类（使用 Middleware）。
     """
 
     def __init__(
@@ -33,7 +30,7 @@ class BaseSessionAgent(BaseAgent):
         default_system_prompt: str = "你是一个有用的助手",
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
-        hooks: list[RuntimeHook] | HookManager | None = None,
+        middleware: MiddlewareStack | None = None,
     ) -> None:
         """初始化公共依赖和默认会话配置。"""
         self.llm = llm
@@ -49,7 +46,7 @@ class BaseSessionAgent(BaseAgent):
                 self.tool_registry.register(tool)
 
         self.tool_executor = ToolExecutor(self.tool_registry)
-        self.hooks = hooks if isinstance(hooks, HookManager) else HookManager(hooks)
+        self.middleware = middleware or MiddlewareStack()
         self._sessions: dict[str, AgentSession] = {}
 
     def create_session(

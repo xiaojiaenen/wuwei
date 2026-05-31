@@ -1,6 +1,6 @@
 """运行时模块"""
 
-from wuwei.runtime.agent_runner_v2 import AgentRunner
+from wuwei.runtime.agent_runner import AgentRunner
 
 __all__ = [
     "AgentRunner",

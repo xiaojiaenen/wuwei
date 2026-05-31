@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import Any, Callable
-from wuwei.agent.agent_v2 import Agent
+from wuwei.agent.agent import Agent
 from wuwei.core.message import HumanMessage, AIMessage
 
 

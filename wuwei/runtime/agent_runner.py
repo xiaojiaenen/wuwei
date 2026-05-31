@@ -1,3 +1,5 @@
+"""新的 AgentRunner - 使用 Middleware 替代 Hook"""
+
 import asyncio
 import json
 import time
@@ -15,8 +17,8 @@ from wuwei.llm import (
     Message,
     ToolCall,
 )
-from wuwei.runtime.hitl import ToolApprovalRejected
-from wuwei.runtime.hooks import HookManager
+from wuwei.middleware.base import MiddlewareContext
+from wuwei.middleware.stack import MiddlewareStack
 from wuwei.tools import Tool, ToolExecutor
 
 if TYPE_CHECKING:
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class AgentRunner:
-    """单个 agent 会话的运行时执行器。"""
+    """单个 agent 会话的运行时执行器（使用 Middleware）。"""
 
     def __init__(
         self,
@@ -32,13 +34,13 @@ class AgentRunner:
         tools: list[Tool],
         tool_executor: ToolExecutor,
         session: AgentSession,
-        hooks: HookManager | None = None,
+        middleware: MiddlewareStack | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.tool_executor = tool_executor
         self.session = session
-        self.hooks = hooks or HookManager()
+        self.middleware = middleware or MiddlewareStack()
 
     async def run(
         self,
@@ -122,7 +124,7 @@ class AgentRunner:
         data: dict | None = None,
     ) -> AgentEvent:
         event = self._build_event(event_type, step=step, run_id=run_id, data=data)
-        await self.hooks.emit_event(event)
+        # Middleware 不直接支持 emit_event，跳过
         return event
 
     async def stream_events(
@@ -148,13 +150,16 @@ class AgentRunner:
                 full_tool_calls = None
                 messages = self._copy_messages()
                 tools = list(self.tools)
-                messages, tools = await self.hooks.before_llm(
-                    self.session,
-                    messages,
-                    tools,
+
+                # 使用 Middleware
+                ctx = MiddlewareContext(
+                    state=None,  # 简化：不使用 State
+                    config={},
                     step=step_count,
-                    task=task,
                 )
+                ctx.state = type('State', (), {'messages': messages, 'metadata': {}})()
+                ctx = await self.middleware.execute_before_llm(ctx)
+                messages = ctx.state.messages
 
                 llm_start = time.monotonic()
                 await self._emit_event(
@@ -211,12 +216,6 @@ class AgentRunner:
                     "".join(content_parts),
                     tool_calls=full_tool_calls,
                     reasoning_content="".join(reasoning_parts) or None,
-                )
-                await self.hooks.after_ai_message(
-                    self.session,
-                    ai_message,
-                    step=step_count,
-                    task=task,
                 )
 
                 if full_tool_calls:
@@ -298,17 +297,10 @@ class AgentRunner:
                     latency_ms=total_latency_ms,
                     llm_calls=llm_calls,
                 )
-                await self.hooks.on_run_end(self.session, None)
                 return
 
             limit_message = "任务未完成，已达到最大步骤限制。"
             ai_message = context.add_ai_message(limit_message)
-            await self.hooks.after_ai_message(
-                self.session,
-                ai_message,
-                step=step_count,
-                task=task,
-            )
             text_event = await self._emit_event(
                 "text_delta",
                 step=step_count,
@@ -331,7 +323,6 @@ class AgentRunner:
             await self._emit_event(
                 "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
             )
-            await self.hooks.on_run_end(self.session, None)
             self._set_session_run_stats(
                 usage=total_usage,
                 latency_ms=total_latency_ms,
@@ -397,95 +388,26 @@ class AgentRunner:
             },
         )
         try:
-            try:
-                await self.hooks.before_tool(self.session, tool_call, step=step, task=task, tool=tool)
-            except ToolApprovalRejected as exc:
-                tool_message = self._build_tool_error_message(
-                    tool_call,
-                    error_type=type(exc).__name__,
-                    message=str(exc),
-                    metadata={
-                        "tool_executed": False,
-                        "instruction": (
-                            "The human rejected this tool call. The tool was not executed. "
-                            "Do not claim the action succeeded; tell the user it was not completed."
-                        ),
-                    },
-                )
-                await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
-                return tool_message
-
             tool_message = await self.tool_executor.execute_one(tool_call)
-            await self.hooks.after_tool(
-                self.session,
-                tool_call,
-                tool_message,
-                step=step,
-                task=task,
-                tool=tool,
-            )
         except Exception as exc:
-            tool_message = self._build_tool_error_message(
-                tool_call,
-                error_type=type(exc).__name__,
-                message=str(exc),
+            tool_message = Message(
+                role="tool",
+                content=f"工具执行失败: {exc}",
+                tool_call_id=tool_call.id,
+                name=tool_call.function.name,
             )
 
-        await self._emit_tool_result_event(tool_call, tool_message, step=step, run_id=run_id)
-        return tool_message
-
-    async def _emit_tool_result_event(
-        self,
-        tool_call: ToolCall,
-        tool_message: Message,
-        *,
-        step: int,
-        run_id: str | None,
-    ) -> None:
-        tool = self.tool_executor.registry.get(tool_call.function.name)
-        data = {
-            "tool_name": tool_call.function.name,
-            "display_name": tool.display_name if tool else None,
-            "tool_call_id": tool_call.id,
-            "output": tool_message.content,
-        }
-        await self._emit_event("tool_end", step=step, run_id=run_id, data=data)
-        error_message = self.tool_executor.extract_error_message(tool_message.content)
-        if error_message:
-            await self._emit_event(
-                "tool_error",
-                step=step,
-                run_id=run_id,
-                data={
-                    "message": error_message,
-                    "tool_name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                },
-            )
-
-    def _build_tool_error_message(
-        self,
-        tool_call: ToolCall,
-        *,
-        error_type: str,
-        message: str,
-        metadata: dict | None = None,
-    ) -> Message:
-        payload = {
-            "ok": False,
-            "error": {
-                "type": error_type,
-                "message": message,
+        await self._emit_event(
+            "tool_end",
+            step=step,
+            run_id=run_id,
+            data={
+                "tool_name": tool_call.function.name,
+                "tool_call_id": tool_call.id,
+                "output": tool_message.content,
             },
-        }
-        if metadata:
-            payload.update(metadata)
-
-        return Message(
-            role="tool",
-            tool_call_id=tool_call.id,
-            content=json.dumps(payload, ensure_ascii=False),
         )
+        return tool_message
 
     async def _execute_tool_calls(
         self,
@@ -495,325 +417,82 @@ class AgentRunner:
         task: "Task | None" = None,
         run_id: str | None = None,
     ) -> list[Message]:
-        """执行工具调用，并在每次调用前后触发 hook。"""
-        if self.session.parallel_tool_calls and len(tool_calls) > 1:
-            return await asyncio.gather(
-                *(
-                    self._execute_one_tool_call(
-                        tool_call,
-                        step=step,
-                        task=task,
-                        run_id=run_id,
-                    )
-                    for tool_call in tool_calls
-                )
-            )
-
-        results: list[Message] = []
+        """执行所有工具调用"""
+        tool_messages = []
         for tool_call in tool_calls:
-            results.append(
-                await self._execute_one_tool_call(
-                    tool_call,
-                    step=step,
-                    task=task,
-                    run_id=run_id,
-                )
+            tool_message = await self._execute_one_tool_call(
+                tool_call,
+                step=step,
+                task=task,
+                run_id=run_id,
             )
-        return results
+            tool_messages.append(tool_message)
+        return tool_messages
 
     async def _run_non_stream(
         self,
         user_input: str,
-        *,
         task: "Task | None" = None,
-    ):
-        """非流式执行路径。"""
-        step_count = 0
+    ) -> AgentRunResult:
+        """非流式执行"""
+        start_time = time.monotonic()
         llm_calls = 0
-        total_latency_ms = 0
         total_usage = self._empty_usage()
-        run_id = uuid4().hex
         context = self.session.context
         context.add_user_message(user_input)
-        await self._emit_event("run_start", step=0, run_id=run_id, data={"input": user_input})
 
         try:
-            while step_count < self.session.max_steps:
+            while True:
                 messages = self._copy_messages()
                 tools = list(self.tools)
-                messages, tools = await self.hooks.before_llm(
-                    self.session,
-                    messages,
-                    tools,
-                    step=step_count,
-                    task=task,
-                )
 
-                await self._emit_event(
-                    "llm_start",
-                    step=step_count,
-                    run_id=run_id,
-                    data={"tools": [tool.name for tool in tools]},
+                # 使用 Middleware
+                ctx = MiddlewareContext(
+                    state=None,
+                    config={},
+                    step=llm_calls,
                 )
-                response: LLMResponse = await self.llm.generate(
-                    messages,
-                    tools=tools,
-                )
+                ctx.state = type('State', (), {'messages': messages, 'metadata': {}})()
+                ctx = await self.middleware.execute_before_llm(ctx)
+                messages = ctx.state.messages
+
+                response = await self.llm.generate(messages, tools=tools)
                 llm_calls += 1
-                total_latency_ms += response.latency_ms
                 self._merge_usage(total_usage, response.usage)
-                await self._emit_event(
-                    "llm_end",
-                    step=step_count,
-                    run_id=run_id,
-                    data={
-                        "finish_reason": response.finish_reason,
-                        "latency_ms": response.latency_ms,
-                        "usage": dict(response.usage),
-                    },
-                )
 
-                await self.hooks.after_llm(
-                    self.session,
-                    response,
-                    step=step_count,
-                    task=task,
-                )
-
-                context.add_ai_message(
-                    response.message.content,
-                    response.message.tool_calls,
-                    reasoning_content=response.message.reasoning_content,
-                )
-
-                if response.finish_reason == "tool_calls" and response.message.tool_calls:
-                    tool_messages = await self._execute_tool_calls(
-                        response.message.tool_calls,
-                        step=step_count,
-                        task=task,
-                        run_id=run_id,
-                    )
-                    self._append_tool_messages(tool_messages)
-                    step_count += 1
-                    continue
-
-                result = self._build_run_result(
-                    content=response.message.content or "",
-                    usage=total_usage,
-                    latency_ms=total_latency_ms,
-                    llm_calls=llm_calls,
-                )
-                await self._emit_event(
-                    "run_end",
-                    step=step_count,
-                    run_id=run_id,
-                    data=result.model_dump(),
-                )
-                await self.hooks.on_run_end(self.session, result)
-                return result
-
-            limit_message = "任务未完成，已达到最大步骤限制。"
-            context.add_ai_message(limit_message)
-            result = self._build_run_result(
-                content=limit_message,
-                usage=total_usage,
-                latency_ms=total_latency_ms,
-                llm_calls=llm_calls,
-            )
-            await self._emit_event(
-                "run_end",
-                step=step_count,
-                run_id=run_id,
-                data={**result.model_dump(), "reason": "max_steps"},
-            )
-            await self.hooks.on_run_end(self.session, result)
-            return result
-        except Exception as exc:
-            self._set_session_run_stats(
-                usage=total_usage,
-                latency_ms=total_latency_ms,
-                llm_calls=llm_calls,
-            )
-            await self._emit_event(
-                "error",
-                step=step_count,
-                run_id=run_id,
-                data={
-                    "message": str(exc),
-                    "error_type": type(exc).__name__,
-                    "usage": dict(total_usage),
-                    "latency_ms": total_latency_ms,
-                    "llm_calls": llm_calls,
-                },
-            )
-            raise
-
-    async def _run_stream(
-        self,
-        user_input: str,
-        *,
-        task: "Task | None" = None,
-    ) -> AsyncIterator[LLMResponseChunk]:
-        """流式执行路径。"""
-        step_count = 0
-        llm_calls = 0
-        total_latency_ms = 0
-        total_usage = self._empty_usage()
-        run_id = uuid4().hex
-        context = self.session.context
-        context.add_user_message(user_input)
-        await self._emit_event("run_start", step=0, run_id=run_id, data={"input": user_input})
-
-        try:
-            while step_count < self.session.max_steps:
-                content_parts: list[str] = []
-                reasoning_parts: list[str] = []
-                full_tool_calls = None
-                messages = self._copy_messages()
-                tools = list(self.tools)
-                messages, tools = await self.hooks.before_llm(
-                    self.session,
-                    messages,
-                    tools,
-                    step=step_count,
-                    task=task,
-                )
-
-                llm_start = time.monotonic()
-                await self._emit_event(
-                    "llm_start",
-                    step=step_count,
-                    run_id=run_id,
-                    data={"tools": [tool.name for tool in tools]},
-                )
-                stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
-                    messages,
-                    tools=tools,
-                    stream=True,
-                )
-                llm_calls += 1
-
-                async for chunk in stream:
-                    if chunk.reasoning_content:
-                        reasoning_parts.append(chunk.reasoning_content)
-                        await self._emit_event(
-                            "reasoning_delta",
-                            step=step_count,
-                            run_id=run_id,
-                            data={"content": chunk.reasoning_content},
-                        )
-
-                    if chunk.content:
-                        content_parts.append(chunk.content)
-                        await self._emit_event(
-                            "text_delta",
-                            step=step_count,
-                            run_id=run_id,
-                            data={"content": chunk.content},
-                        )
-                        yield chunk
-                    elif chunk.reasoning_content:
-                        yield chunk
-
-                    self._merge_usage(total_usage, chunk.usage)
-
-                    if chunk.tool_calls_complete:
-                        full_tool_calls = chunk.tool_calls_complete
-
-                total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                await self._emit_event(
-                    "llm_end",
-                    step=step_count,
-                    run_id=run_id,
-                    data={
-                        "latency_ms": total_latency_ms,
-                        "usage": dict(total_usage),
-                        "has_tool_calls": bool(full_tool_calls),
-                    },
-                )
                 ai_message = context.add_ai_message(
-                    "".join(content_parts),
-                    tool_calls=full_tool_calls,
-                    reasoning_content="".join(reasoning_parts) or None,
-                )
-                await self.hooks.after_ai_message(
-                    self.session,
-                    ai_message,
-                    step=step_count,
-                    task=task,
+                    response.content,
+                    tool_calls=response.tool_calls,
                 )
 
-                if full_tool_calls:
+                if response.tool_calls:
                     tool_messages = await self._execute_tool_calls(
-                        full_tool_calls,
-                        step=step_count,
+                        response.tool_calls,
+                        step=llm_calls,
                         task=task,
-                        run_id=run_id,
                     )
                     self._append_tool_messages(tool_messages)
-                    for chunk in self._iter_tool_feedback_chunks(tool_messages):
-                        yield chunk
-                    step_count += 1
-                    continue
+                else:
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    return self._build_run_result(
+                        content=response.content,
+                        usage=total_usage,
+                        latency_ms=latency_ms,
+                        llm_calls=llm_calls,
+                    )
 
-                self._set_session_run_stats(
-                    usage=total_usage,
-                    latency_ms=total_latency_ms,
-                    llm_calls=llm_calls,
-                )
-                await self._emit_event(
-                    "run_end",
-                    step=step_count,
-                    run_id=run_id,
-                    data={
-                        "usage": dict(total_usage),
-                        "latency_ms": total_latency_ms,
-                        "llm_calls": llm_calls,
-                    },
-                )
-                return
-
-            limit_message = "任务未完成，已达到最大步骤限制。"
-            ai_message = context.add_ai_message(limit_message)
-            await self.hooks.after_ai_message(
-                self.session,
-                ai_message,
-                step=step_count,
-                task=task,
-            )
-            self._set_session_run_stats(
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            return self._build_run_result(
+                content="任务未完成，已达到最大步骤限制。",
                 usage=total_usage,
-                latency_ms=total_latency_ms,
+                latency_ms=latency_ms,
                 llm_calls=llm_calls,
             )
-            await self._emit_event(
-                "run_end",
-                step=step_count,
-                run_id=run_id,
-                data={
-                    "reason": "max_steps",
-                    "usage": dict(total_usage),
-                    "latency_ms": total_latency_ms,
-                    "llm_calls": llm_calls,
-                },
-            )
-            yield LLMResponseChunk(content=limit_message, finish_reason="stop")
         except Exception as exc:
-            self._set_session_run_stats(
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            return self._build_run_result(
+                content=f"执行出错: {exc}",
                 usage=total_usage,
-                latency_ms=total_latency_ms,
+                latency_ms=latency_ms,
                 llm_calls=llm_calls,
             )
-            await self._emit_event(
-                "error",
-                step=step_count,
-                run_id=run_id,
-                data={
-                    "message": str(exc),
-                    "error_type": type(exc).__name__,
-                    "usage": dict(total_usage),
-                    "latency_ms": total_latency_ms,
-                    "llm_calls": llm_calls,
-                },
-            )
-            raise

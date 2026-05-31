@@ -1,18 +1,19 @@
+"""Agent 类 - 使用 Middleware"""
+
 from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable
 
 from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
 from wuwei.llm import AgentEvent, LLMGateway
-from wuwei.runtime import AgentRunner
-from wuwei.skill.skill import SkillManager
+from wuwei.runtime.agent_runner import AgentRunner
 from wuwei.tools import Tool, ToolRegistry
 
 ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
 
 
 class Agent(BaseSessionAgent):
-    """普通单 agent 门面对象。"""
+    """普通单 agent 门面对象（使用 Middleware）。"""
 
     def __init__(
         self,
@@ -21,7 +22,7 @@ class Agent(BaseSessionAgent):
         default_system_prompt: str = "你是一个有用的助手",
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
-        hooks = None,
+        middleware=None,
     ) -> None:
         super().__init__(
             llm=llm,
@@ -29,7 +30,7 @@ class Agent(BaseSessionAgent):
             default_system_prompt=default_system_prompt,
             default_max_steps=default_max_steps,
             default_parallel_tool_calls=default_parallel_tool_calls,
-            hooks=hooks
+            middleware=middleware,
         )
 
     def create_runner(self, session: AgentSession) -> AgentRunner:
@@ -39,7 +40,7 @@ class Agent(BaseSessionAgent):
             tools=self.tool_registry.list_tools(),
             tool_executor=self.tool_executor,
             session=session,
-            hooks=self.hooks
+            middleware=self.middleware,
         )
 
     async def run(
@@ -66,16 +67,16 @@ class Agent(BaseSessionAgent):
 
     @classmethod
     def from_env(
-            cls,
-            *,
-            builtin_tools: list[str] | None = None,
-            tools: list[ToolLike] | None = None,
-            system_prompt: str = "你是一个有用的助手",
-            max_steps: int = 10,
-            parallel_tool_calls: bool = False,
-            hooks=None,
-            skill_manager=None,
-            **llm_kwargs,
+        cls,
+        *,
+        builtin_tools: list[str] | None = None,
+        tools: list[ToolLike] | None = None,
+        system_prompt: str = "你是一个有用的助手",
+        max_steps: int = 10,
+        parallel_tool_calls: bool = False,
+        middleware=None,
+        skill_manager=None,
+        **llm_kwargs,
     ) -> "Agent":
         llm = LLMGateway.from_env(**llm_kwargs)
         registry = ToolRegistry.from_builtin(builtin_tools, skill_manager=skill_manager)
@@ -95,5 +96,5 @@ class Agent(BaseSessionAgent):
             default_system_prompt=system_prompt,
             default_max_steps=max_steps,
             default_parallel_tool_calls=parallel_tool_calls,
-            hooks=hooks,
+            middleware=middleware,
         )
