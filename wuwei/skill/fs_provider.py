@@ -68,6 +68,8 @@ class FileSystemSkillProvider(SkillProvider):
         references = (
             self._collect_relative_files(path.parent / "references") if path is not None else []
         )
+
+        # 解析增强的元数据字段
         return Skill(
             name=name,
             description=description,
@@ -75,6 +77,15 @@ class FileSystemSkillProvider(SkillProvider):
             path=skill_path,
             scripts=scripts,
             references=references,
+            # 新增的增强字段
+            version=frontmatter.get("version", "1.0.0"),
+            author=frontmatter.get("author", ""),
+            license=frontmatter.get("license", "MIT"),
+            when_to_use=frontmatter.get("when_to_use", ""),
+            allowed_tools=frontmatter.get("allowed_tools", []),
+            required_tools=frontmatter.get("required_tools", []),
+            model=frontmatter.get("model"),
+            tags=frontmatter.get("tags", []),
         )
 
     def _collect_relative_files(self, root: Path) -> list[str]:
