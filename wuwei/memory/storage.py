@@ -56,7 +56,9 @@ class FileStorage:
 
     async def append_message(self, session_id: str, message: Message) -> None:
         path = self.root / f"{session_id}.jsonl"
-        line = json.dumps(message.model_dump(exclude_none=True), ensure_ascii=False)
+        data = message.model_dump(exclude_none=True)
+        # 处理 datetime 等非 JSON 类型
+        line = json.dumps(data, ensure_ascii=False, default=str)
         with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 

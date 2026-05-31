@@ -43,10 +43,28 @@ class State:
         return [msg for msg in self.messages if msg.role == "tool"]
 
     def to_dict(self) -> dict:
-        """转换为字典"""
+        """转换为字典（JSON 可序列化）"""
+        import json
+        from datetime import datetime
+
+        def _serialize_value(obj):
+            """递归序列化，处理 datetime 等非 JSON 类型"""
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            if isinstance(obj, dict):
+                return {k: _serialize_value(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_serialize_value(v) for v in obj]
+            return obj
+
+        messages_data = []
+        for msg in self.messages:
+            msg_dict = msg.model_dump()
+            messages_data.append(_serialize_value(msg_dict))
+
         return {
-            "messages": [msg.model_dump() for msg in self.messages],
-            "metadata": self.metadata,
+            "messages": messages_data,
+            "metadata": _serialize_value(self.metadata),
             "step": self.step,
         }
 
