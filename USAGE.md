@@ -1,4 +1,4 @@
-# Wuwei 2.0 用户使用文档
+# Wuwei 2.1 用户使用文档
 
 > Wuwei - 无为而治的 AI 智能体框架
 
@@ -10,6 +10,9 @@
 - [工具系统](#工具系统)
 - [状态图编排](#状态图编排)
 - [中间件系统](#中间件系统)
+- [Output Parsers](#output-parsers)
+- [插件系统](#插件系统)
+- [上下文压缩](#上下文压缩)
 - [MCP 支持](#mcp-支持)
 - [技能系统](#技能系统)
 - [多平台网关](#多平台网关)
@@ -309,6 +312,105 @@ stack.add(HitlMiddleware(
     auto_reject_tools=["dangerous_tool"],
 ))
 ```
+
+## Output Parsers
+
+### JSON 解析
+
+```python
+from wuwei.parsers import JsonOutputParser
+
+parser = JsonOutputParser()
+result = parser.parse('{"name": "test", "value": 123}')
+# result = {"name": "test", "value": 123}
+```
+
+### Pydantic 验证
+
+```python
+from wuwei.parsers import PydanticOutputParser
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    age: int
+
+parser = PydanticOutputParser(schema=User)
+result = parser.parse('{"name": "test", "age": 25}')
+# result = User(name="test", age=25)
+```
+
+### 列表解析
+
+```python
+from wuwei.parsers import ListOutputParser
+
+parser = ListOutputParser()
+result = parser.parse("item1, item2, item3")
+# result = ["item1", "item2", "item3"]
+```
+
+## 插件系统
+
+### 创建插件
+
+创建 `plugins/my-plugin/plugin.yaml`：
+
+```yaml
+name: my-plugin
+version: 1.0.0
+description: 我的插件
+hooks:
+  pre_tool_call: on_tool_call
+  post_llm_call: on_llm_response
+tools:
+  - name: my_tool
+    description: 我的工具
+    handler: my_tool_handler
+```
+
+### 使用
+
+```python
+from wuwei.plugin import PluginLoader, PluginRegistry
+
+# 加载插件
+loader = PluginLoader("plugins/")
+plugins = loader.load_all()
+
+# 注册插件
+registry = PluginRegistry()
+for plugin in plugins:
+    registry.register(plugin)
+
+# 获取插件钩子和工具
+hooks = registry.get_hook("pre_tool_call")
+tools = registry.list_tools()
+```
+
+## 上下文压缩
+
+### 基本用法
+
+```python
+from wuwei.middleware import ContextCompressionMiddleware
+
+middleware = ContextCompressionMiddleware(
+    llm=llm,
+    trigger_tokens=4000,  # 4000 token 时触发
+    keep_recent=10,       # 保留最近 10 轮
+)
+
+agent = Agent(llm=llm, tools=tools, middleware=MiddlewareStack([middleware]))
+```
+
+### 自动压缩流程
+
+1. 检测 token 数量
+2. 截断大参数（优化）
+3. 生成对话摘要
+4. 保留最近消息
+5. 卸载旧消息到文件
 
 ## MCP 支持
 

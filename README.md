@@ -1,20 +1,24 @@
-# Wuwei 2.0
+# Wuwei 2.1
 
 > 无为而治的 AI 智能体框架
 
-Wuwei 2.0 是一个轻量、可扩展的 Python Agent 框架，借鉴了 LangChain、LangGraph、Deep Agents、Hermes Agent、AgentScope、Claude Code、agent-framework、rig 八大框架的优点。
+Wuwei 2.1 是一个轻量、可扩展的 Python Agent 框架，借鉴了 LangChain、LangGraph、Deep Agents、Hermes Agent、AgentScope、Claude Code、agent-framework、rig 八大框架的优点。
 
 ## 特性
 
 - 🚀 **轻量核心** — 核心包仅 ~50KB，按需安装扩展
 - 🔌 **多提供商** — 支持 OpenAI、Anthropic、智谱、DashScope、Ollama
-- 📊 **状态图编排** — 借鉴 LangGraph 的 StateGraph
+- 📊 **状态图编排** — 借鉴 LangGraph 的 StateGraph + Channels
 - 🧩 **可组合中间件** — 替代固定 Hook，支持动态插拔
 - 🔗 **MCP 支持** — Model Context Protocol 客户端
 - 🌐 **多平台网关** — 微信、钉钉、飞书、Telegram、Webhook
 - 🛡️ **沙箱执行** — Docker/E2B 隔离执行
 - 📈 **可观测性** — OpenTelemetry 追踪
 - 🤖 **多 Agent 协作** — Swarm 团队协作模式
+- 📦 **插件系统** — 自动发现和加载插件
+- 📝 **Output Parsers** — JSON/Pydantic/列表解析器
+- 🔄 **上下文压缩** — 自动压缩长对话
+- 📡 **流式模式** — 支持多种流式输出模式
 
 ## 安装
 
@@ -85,6 +89,7 @@ llm = LLMGateway.from_env(provider="ollama")
 
 ```python
 from wuwei.graph import StateGraph, State, END
+from wuwei.graph.channels import LastValue, Topic
 
 async def llm_node(state: State, config: dict) -> State:
     # 调用 LLM
@@ -108,7 +113,7 @@ state = await app.invoke(State())
 ### 中间件系统
 
 ```python
-from wuwei.middleware import Middleware, MiddlewareStack
+from wuwei.middleware import Middleware, MiddlewareStack, ContextCompressionMiddleware
 
 class LoggingMiddleware(Middleware):
     async def before_llm(self, ctx):
@@ -117,8 +122,48 @@ class LoggingMiddleware(Middleware):
 
 stack = MiddlewareStack()
 stack.add(LoggingMiddleware())
+stack.add(ContextCompressionMiddleware(llm=llm, trigger_tokens=4000))
 
 agent = Agent(llm=llm, tools=tools, middleware=stack)
+```
+
+### Output Parsers
+
+```python
+from wuwei.parsers import JsonOutputParser, PydanticOutputParser
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    age: int
+
+# JSON 解析
+parser = JsonOutputParser()
+result = parser.parse('{"name": "test", "age": 25}')
+
+# Pydantic 验证
+parser = PydanticOutputParser(schema=User)
+result = parser.parse('{"name": "test", "age": 25}')
+# result = User(name="test", age=25)
+```
+
+### 插件系统
+
+```python
+from wuwei.plugin import PluginLoader, PluginRegistry
+
+# 加载插件
+loader = PluginLoader("plugins/")
+plugins = loader.load_all()
+
+# 注册插件
+registry = PluginRegistry()
+for plugin in plugins:
+    registry.register(plugin)
+
+# 获取插件钩子和工具
+hooks = registry.get_hook("pre_tool_call")
+tools = registry.list_tools()
 ```
 
 ### MCP 支持
@@ -157,15 +202,18 @@ wuwei/
 ├── llm/           # LLM 网关（6 个适配器）
 ├── tools/         # 工具系统（11 组内置工具）
 ├── agent/         # Agent（单 Agent + 多 Agent Swarm）
-├── graph/         # 状态图编排（StateGraph/检查点）
-├── middleware/     # 中间件系统（日志/HITL）
+├── graph/         # 状态图编排（StateGraph/检查点/Channels）
+├── middleware/     # 中间件系统（日志/HITL/上下文压缩）
 ├── mcp/           # MCP 协议支持
 ├── skill/         # 技能系统
 ├── gateway/       # 多平台网关（微信/钉钉/飞书/Telegram/Webhook）
 ├── sandbox/       # 沙箱执行
 ├── observability/ # 可观测性（OpenTelemetry）
 ├── config/        # YAML 配置
-└── tests/         # 测试（128 个）
+├── plugin/        # 插件系统
+├── parsers/       # Output Parsers
+├── streaming/     # 流式模式
+└── tests/         # 测试（72 个）
 ```
 
 ## 内置工具
