@@ -8,6 +8,7 @@ from wuwei.middleware.storage import StorageMiddleware
 from wuwei.middleware.memory import MemoryMiddleware
 from wuwei.middleware.rag import RagMiddleware
 from wuwei.middleware.skill import SkillMiddleware
+from wuwei.middleware.context_compression import ContextCompressionMiddleware
 
 __all__ = [
     "Middleware",
@@ -20,4 +21,5 @@ __all__ = [
     "MemoryMiddleware",
     "RagMiddleware",
     "SkillMiddleware",
+    "ContextCompressionMiddleware",
 ]
