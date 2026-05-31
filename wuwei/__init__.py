@@ -1,5 +1,5 @@
 from wuwei.agent import Agent, AgentSession, BaseAgent, BaseSessionAgent, PlanAgent
-from wuwei.agent.agent_v2 import Agent as AgentV2
+from wuwei.agent.multi_agent import Swarm, TeamMember, SubTask
 from wuwei.core import (
     Runnable,
     RunnableSequence,
@@ -54,12 +54,14 @@ from wuwei.tools.base import tool
 __all__ = [
     # Agent
     "Agent",
-    "AgentV2",
     "AgentRunner",
     "AgentSession",
     "BaseAgent",
     "BaseSessionAgent",
     "PlanAgent",
+    "Swarm",
+    "TeamMember",
+    "SubTask",
     # Core
     "Runnable",
     "RunnableSequence",
