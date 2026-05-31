@@ -3,34 +3,56 @@ import json
 import pytest
 
 from wuwei.agent.session import AgentSession
-from wuwei.runtime.skill_hook import DEFAULT_SKILL_INSTRUCTION, SkillHook
+from wuwei.middleware import MiddlewareStack
+from wuwei.middleware.skill import SkillMiddleware
 from wuwei.skill.fs_provider import FileSystemSkillProvider
-from wuwei.skill.skill import SkillManager
+from wuwei.skill.skill import SkillManager, Skill
 from wuwei.tools import ToolRegistry
 from wuwei.tools.builtin import register_skill_tools
 from wuwei.tools.builtin import skill_tools as skill_tools_module
 
 
 @pytest.mark.asyncio
-async def test_skill_hook_appends_generic_skill_guidance_to_system_prompt() -> None:
+async def test_skill_middleware_injects_skill_guidance() -> None:
+    """测试技能中间件注入技能指引"""
+    # 创建技能管理器
+    skill = Skill(
+        name="test-skill",
+        description="测试技能",
+        instruction="测试指令",
+    )
+
+    class MockProvider:
+        def list_skills(self):
+            return [skill]
+
+    manager = SkillManager([MockProvider()])
+
+    # 创建中间件
+    middleware = SkillMiddleware(skill_manager=manager)
+
+    # 创建会话
     session = AgentSession(
         session_id="session-1",
         system_prompt="你是一个有用的助手",
     )
-    messages = [message.model_copy(deep=True) for message in session.context.get_messages()]
 
-    updated_messages, updated_tools = await SkillHook().before_llm(
-        session,
-        messages,
-        [],
-        step=0,
-        task=None,
-    )
+    # 创建上下文
+    from wuwei.middleware.base import MiddlewareContext
+    from wuwei.graph.state import State
 
-    assert updated_tools == []
-    assert updated_messages[0].role == "system"
-    assert updated_messages[0].content == f"你是一个有用的助手\n\n{DEFAULT_SKILL_INSTRUCTION}"
-    assert session.context.get_messages()[0].content == "你是一个有用的助手"
+    state = State()
+    state.messages = session.context.get_messages()
+
+    ctx = MiddlewareContext(state=state)
+
+    # 执行中间件
+    ctx = await middleware.before_llm(ctx)
+
+    # 验证技能指引已注入
+    assert len(ctx.state.messages) > 0
+    assert ctx.state.messages[0].role == "system"
+    assert "test-skill" in ctx.state.messages[0].content
 
 
 @pytest.mark.asyncio
