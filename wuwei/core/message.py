@@ -59,7 +59,9 @@ class BaseMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     role: str
     content: str = ""
-    reasoning_content: Optional[str] = None  # 支持 reasoning_content
+    reasoning_content: Optional[str] = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)  # 所有消息都有 tool_calls
+    tool_call_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: dict = Field(default_factory=dict)
 
@@ -91,7 +93,6 @@ class HumanMessage(BaseMessage):
 class AIMessage(BaseMessage):
     """AI 消息"""
     role: Literal["assistant"] = "assistant"
-    tool_calls: list[ToolCall] = Field(default_factory=list)
     reasoning_content: Optional[str] = None
     usage: Optional[dict] = None
 
