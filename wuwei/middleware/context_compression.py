@@ -168,8 +168,33 @@ class ContextCompressionMiddleware(Middleware):
         protect_head = min(2, len(non_system) // 3)
         protect_tail = self.keep_recent_turns * 2  # 用户+助手各算一条
 
-        old_messages = non_system[protect_head:-protect_tail] if protect_tail > 0 else non_system[protect_head:]
-        recent_messages = non_system[-protect_tail:] if protect_tail > 0 else []
+        # 从保护尾部位置向前查找安全切分点——不在 tool_call 配对中间切断
+        cut = len(non_system) - protect_tail
+        cut = max(cut, protect_head)
+
+        # 向前扩展：如果 cut 落在 tool_call 配对中间，把整个配对移到 recent_messages
+        # 场景：[assistant(tool_calls=[tc5]), tool(tc5)] 如果 tool(tc5) 在 recent 中，
+        #        assistant(tool_calls=[tc5]) 也必须在 recent 中
+        while cut > protect_head:
+            msg = non_system[cut]
+            if msg.role == "tool" and getattr(msg, "tool_call_id", None):
+                # 找到 tool response，向前找对应的 assistant(tool_calls)
+                tc_id = msg.tool_call_id
+                found = False
+                for j in range(cut - 1, protect_head - 1, -1):
+                    prev = non_system[j]
+                    if prev.role == "assistant" and prev.tool_calls:
+                        if any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id")):
+                            cut = j
+                            found = True
+                            break
+                if not found:
+                    break
+            else:
+                break
+
+        old_messages = non_system[protect_head:cut]
+        recent_messages = non_system[cut:]
 
         if not old_messages:
             return messages
@@ -187,7 +212,49 @@ class ContextCompressionMiddleware(Middleware):
                 role="user",
                 content=summary,
             )
-            result = system_messages + [summary_msg] + recent_messages
+            # 确保 recent_messages 中的 tool_call 配对完整
+            # 如果 recent_messages 以 assistant(tool_calls) 开头，保留它
+            # 如果以 tool response 开头，找回对应的 assistant(tool_calls)
+            recovered = []
+
+            # 处理开头的孤立 tool response
+            while recent_messages and recent_messages[0].role == "tool":
+                tc_id = getattr(recent_messages[0], "tool_call_id", None)
+                if tc_id:
+                    for j in range(len(old_messages) - 1, -1, -1):
+                        prev = old_messages[j]
+                        if prev.role == "assistant" and prev.tool_calls:
+                            if any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id")):
+                                recovered.insert(0, old_messages.pop(j))
+                                break
+                recent_messages = recent_messages[1:]
+
+            # 处理开头的 assistant(tool_calls)，确保对应的 tool response 也在
+            if recent_messages and recent_messages[0].role == "assistant" and recent_messages[0].tool_calls:
+                assistant_msg = recent_messages[0]
+                tc_ids = {tc.id for tc in assistant_msg.tool_calls if hasattr(tc, "id")}
+                # 收集后续的 tool response
+                tool_msgs = []
+                rest = list(recent_messages[1:])
+                while rest and rest[0].role == "tool":
+                    tc_id = getattr(rest[0], "tool_call_id", None)
+                    if tc_id in tc_ids:
+                        tool_msgs.append(rest.pop(0))
+                    else:
+                        break
+                # 如果 tool response 不完整，从 old_messages 中找回
+                found_ids = {getattr(m, "tool_call_id", None) for m in tool_msgs}
+                missing_ids = tc_ids - found_ids
+                for tc_id in missing_ids:
+                    for j in range(len(old_messages) - 1, -1, -1):
+                        prev = old_messages[j]
+                        if prev.role == "tool" and getattr(prev, "tool_call_id", None) == tc_id:
+                            tool_msgs.append(old_messages.pop(j))
+                            break
+                # 重建 recent_messages：assistant + tool_msgs + rest
+                recent_messages = [assistant_msg] + tool_msgs + rest
+
+            result = system_messages + [summary_msg] + recovered + recent_messages
             return result
 
         return messages
