@@ -4,11 +4,36 @@ import subprocess
 import pytest
 
 from wuwei.tools import ToolRegistry
+from wuwei.plugin import PluginContext
+
+
+def _make_registry(*plugin_names: str) -> ToolRegistry:
+    """创建包含指定内置插件的 ToolRegistry。"""
+    registry = ToolRegistry()
+    ctx = PluginContext(tool_registry=registry)
+
+    from wuwei.plugin.builtin import calc as calc_mod
+    from wuwei.plugin.builtin import file as file_mod
+    from wuwei.plugin.builtin import git as git_mod
+    from wuwei.plugin.builtin import npm as npm_mod
+    from wuwei.plugin.builtin import python as python_mod
+
+    mod_map = {
+        "calc": calc_mod,
+        "file": file_mod,
+        "git": git_mod,
+        "npm": npm_mod,
+        "python": python_mod,
+    }
+    for name in plugin_names:
+        mod_map[name].setup(ctx)
+
+    return registry
 
 
 @pytest.mark.asyncio
 async def test_file_tools_read_write_replace_delete(tmp_path) -> None:
-    registry = ToolRegistry.from_builtin(["file"])
+    registry = _make_registry("file")
 
     write_result = await registry.get("write_text_file").invoke(
         {
@@ -44,7 +69,7 @@ async def test_file_tools_read_write_replace_delete(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_file_tools_reject_path_outside_workspace(tmp_path) -> None:
-    registry = ToolRegistry.from_builtin(["file"])
+    registry = _make_registry("file")
 
     with pytest.raises(ValueError, match="workspace"):
         await registry.get("read_text_file").invoke(
@@ -54,7 +79,7 @@ async def test_file_tools_reject_path_outside_workspace(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_python_tool_runs_workspace_script(tmp_path) -> None:
-    registry = ToolRegistry.from_builtin(["python"])
+    registry = _make_registry("python")
     script = tmp_path / "echo.py"
     script.write_text(
         "import json\n"
@@ -77,7 +102,7 @@ async def test_python_tool_runs_workspace_script(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_calculate_tool() -> None:
-    registry = ToolRegistry.from_builtin(["calc"])
+    registry = _make_registry("calc")
 
     result = await registry.get("calculate").invoke({"expression": "sqrt(16) + sin(pi / 2)"})
     assert result["ok"] is True
@@ -92,7 +117,7 @@ async def test_git_tools_status_and_diff(tmp_path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
 
-    registry = ToolRegistry.from_builtin(["git"])
+    registry = _make_registry("git")
 
     status = await registry.get("git_status").invoke({"workspace": str(tmp_path)})
     assert status["ok"] is True
@@ -123,7 +148,7 @@ async def test_npm_tools_list_scripts_and_validate_script(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    registry = ToolRegistry.from_builtin(["npm"])
+    registry = _make_registry("npm")
 
     scripts = await registry.get("npm_list_scripts").invoke({"workspace": str(tmp_path)})
     assert scripts["ok"] is True

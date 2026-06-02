@@ -5,7 +5,7 @@ import math
 import operator
 from typing import Any
 
-from wuwei.tools.registry import ToolRegistry
+from wuwei.plugin import PluginContext
 
 _BINARY_OPERATORS = {
     ast.Add: operator.add,
@@ -66,8 +66,8 @@ def _eval_expr(node: ast.AST) -> Any:
     raise ValueError("表达式只能包含数字、数学运算和数学函数")
 
 
-def register_calc_tools(registry: ToolRegistry) -> None:
-    @registry.tool(
+def setup(ctx: PluginContext) -> None:
+    @ctx.tool_registry.tool(
         name="calculate",
         description=(
             "安全计算数学表达式。支持 + - * / // % **、括号、常用 math 函数和常量，"

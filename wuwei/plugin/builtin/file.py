@@ -1,8 +1,10 @@
+"""File 工具插件 — workspace 内文件操作"""
+
 from pathlib import Path
 
 from markitdown import MarkItDown
 
-from wuwei.tools.registry import ToolRegistry
+from wuwei.plugin import PluginContext
 
 DEFAULT_READ_LIMIT = 20_000
 
@@ -80,8 +82,8 @@ def _collect_files(
     return entries, False
 
 
-def register_file_tools(registry: ToolRegistry) -> None:
-    @registry.tool(
+def setup(ctx: PluginContext) -> None:
+    @ctx.tool_registry.tool(
         name="file_to_md",
         description=(
             "将文件转换为 markdown供大模型阅读，支持常见文本文件、pptx,docx,xlsx,xls,pdf 等。"
@@ -98,7 +100,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             return "转换失败，该文件无法转换"
         return result.text_content
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="read_text_file",
         description="读取 workspace 内的文本文件内容。默认最多返回 20000 字符。",
         display_name="读取文本文件",
@@ -126,7 +128,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             "size_chars": len(text),
         }
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="write_text_file",
         description="写入 workspace 内的文本文件。默认不覆盖已有文件，overwrite=true 时才覆盖。",
         side_effect=True,
@@ -156,7 +158,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         target.write_text(content, encoding="utf-8")
         return {"ok": True, "path": str(target), "bytes": len(content.encode("utf-8"))}
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="append_text_file",
         description="向 workspace 内的文本文件末尾追加内容，文件不存在时会创建。",
         side_effect=True,
@@ -179,7 +181,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             file.write(content)
         return {"ok": True, "path": str(target), "bytes": len(content.encode("utf-8"))}
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="replace_text_in_file",
         description="修改 workspace 内文本文件：把 old_text 替换为 new_text。",
         side_effect=True,
@@ -222,7 +224,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
             "replacements": min(occurrences, max_replace),
         }
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="delete_file",
         description="删除 workspace 内的单个文件。只删除文件，不删除目录。",
         side_effect=True,
@@ -244,7 +246,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
         target.unlink()
         return {"ok": True, "path": str(target), "deleted": True}
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="list_files",
         description="列出 workspace 内指定目录下的文件和子目录（默认递归 3 层，最多返回 200 项）。",
         display_name="列出文件",

@@ -1076,17 +1076,21 @@ def test_swarm():
 
 
 def test_plugin_system():
-    """测试 Plugin Registry + Loader"""
-    from wuwei.plugin.registry import PluginRegistry
-    from wuwei.plugin.loader import PluginLoader
+    """测试 PluginManager + PluginContext"""
+    from wuwei.plugin import Plugin, PluginContext, PluginManager
+    from wuwei.tools import ToolRegistry
 
-    registry = PluginRegistry()
-    assert registry is not None
+    registry = ToolRegistry()
+    ctx = PluginContext(tool_registry=registry)
+    pm = PluginManager(ctx)
+    assert pm is not None
 
-    loader = PluginLoader(plugins_dir='/tmp/test_plugins')
-    assert loader is not None
+    # 加载内置插件
+    from wuwei.plugin.builtin import load_all_builtin
+    load_all_builtin(pm)
+    assert len(pm.list_plugins()) > 0
 
-    print("  ✅ Plugin: Registry + Loader 导入 通过")
+    print("  ✅ Plugin: PluginManager + PluginContext + 内置插件 加载 通过")
 
 
 # ═══════════════════════════════════════════════════════════════════

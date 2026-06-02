@@ -1,11 +1,14 @@
-"""Agent 类 - 使用 Middleware"""
+"""Agent 类 - 使用 Middleware + Plugin 系统"""
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
 from wuwei.llm import AgentEvent, LLMGateway
+from wuwei.plugin import Plugin, PluginContext, PluginManager
+from wuwei.plugin.builtin import load_all_builtin
 from wuwei.runtime.agent_runner import AgentRunner
 from wuwei.tools import Tool, ToolRegistry
 
@@ -13,7 +16,7 @@ ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
 
 
 class Agent(BaseSessionAgent):
-    """普通单 agent 门面对象（使用 Middleware）。"""
+    """普通单 agent 门面对象（使用 Middleware + Plugin）。"""
 
     def __init__(
         self,
@@ -23,6 +26,10 @@ class Agent(BaseSessionAgent):
         default_max_steps: int = 10,
         default_parallel_tool_calls: bool = False,
         middleware=None,
+        skill_manager=None,
+        mcp_manager=None,
+        plugins: list[Plugin] | None = None,
+        plugin_dir: str | Path | None = None,
     ) -> None:
         super().__init__(
             llm=llm,
@@ -32,6 +39,34 @@ class Agent(BaseSessionAgent):
             default_parallel_tool_calls=default_parallel_tool_calls,
             middleware=middleware,
         )
+
+        # 保存供插件上下文使用
+        self._skill_manager = skill_manager
+        self._mcp_manager = mcp_manager
+
+        # 初始化插件系统
+        ctx = PluginContext(
+            tool_registry=self.tool_registry,
+            skill_manager=skill_manager,
+            mcp_manager=mcp_manager,
+            middleware_stack=self.middleware,
+        )
+        pm = PluginManager(ctx)
+        load_all_builtin(pm)  # 始终加载内置插件
+
+        if plugins:
+            for p in plugins:
+                pm.register(p)
+
+        if plugin_dir:
+            pm.load_directory(plugin_dir)
+
+        self._plugin_manager = pm
+
+    @property
+    def plugin_manager(self) -> PluginManager:
+        """返回插件管理器实例。"""
+        return self._plugin_manager
 
     def create_runner(self, session: AgentSession) -> AgentRunner:
         """为普通 agent 会话创建执行器。"""
@@ -69,17 +104,19 @@ class Agent(BaseSessionAgent):
     def from_env(
         cls,
         *,
-        builtin_tools: list[str] | None = None,
         tools: list[ToolLike] | None = None,
         system_prompt: str = "你是一个有用的助手",
         max_steps: int = 10,
         parallel_tool_calls: bool = False,
         middleware=None,
         skill_manager=None,
+        mcp_manager=None,
+        plugins: list[Plugin] | None = None,
+        plugin_dir: str | Path | None = None,
         **llm_kwargs,
     ) -> "Agent":
         llm = LLMGateway.from_env(**llm_kwargs)
-        registry = ToolRegistry.from_builtin(builtin_tools, skill_manager=skill_manager)
+        registry = ToolRegistry()
 
         for item in tools or []:
             if isinstance(item, Tool):
@@ -97,4 +134,8 @@ class Agent(BaseSessionAgent):
             default_max_steps=max_steps,
             default_parallel_tool_calls=parallel_tool_calls,
             middleware=middleware,
+            skill_manager=skill_manager,
+            mcp_manager=mcp_manager,
+            plugins=plugins,
+            plugin_dir=plugin_dir,
         )

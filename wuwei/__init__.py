@@ -49,8 +49,8 @@ from wuwei.middleware import (
     StorageMiddleware,
     MemoryMiddleware,
     RagMiddleware,
-    SkillMiddleware,
 )
+from wuwei.plugin import Plugin, PluginContext, PluginManager
 from wuwei.planning import Planner, PlanRunResult, Task, TaskList
 from wuwei.runtime import AgentRunner
 from wuwei.skill.fs_provider import FileSystemSkillProvider
@@ -63,8 +63,6 @@ from wuwei.tools import (
     ToolRegistry,
     ToolRetryPolicy,
 )
-from wuwei.tools.base import tool
-
 __all__ = [
     # Agent
     "Agent",
@@ -120,7 +118,6 @@ __all__ = [
     "StorageMiddleware",
     "MemoryMiddleware",
     "RagMiddleware",
-    "SkillMiddleware",
     # Planning
     "Planner",
     "PlanRunResult",
@@ -138,5 +135,8 @@ __all__ = [
     "ToolParameters",
     "ToolRetryPolicy",
     "ToolRegistry",
-    "tool",
+    # Plugin
+    "Plugin",
+    "PluginContext",
+    "PluginManager",
 ]

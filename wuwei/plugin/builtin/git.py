@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from wuwei.tools.registry import ToolRegistry
+from wuwei.plugin import PluginContext
 
 DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_OUTPUT_LIMIT = 12_000
@@ -80,8 +80,8 @@ def _run_git(
     }
 
 
-def register_git_tools(registry: ToolRegistry) -> None:
-    @registry.tool(name="git_status", description="查看 workspace 内 Git 仓库状态。", display_name="Git状态")
+def setup(ctx: PluginContext) -> None:
+    @ctx.tool_registry.tool(name="git_status", description="查看 workspace 内 Git 仓库状态。", display_name="Git状态")
     def git_status(workspace: str = ".", short: bool = True) -> dict[str, Any]:
         """查看 Git 状态。
 
@@ -91,7 +91,7 @@ def register_git_tools(registry: ToolRegistry) -> None:
         args = ["status", "--short", "--branch"] if short else ["status"]
         return _run_git(args, workspace=workspace)
 
-    @registry.tool(name="git_diff", description="查看 workspace 内 Git diff。", display_name="Git差异")
+    @ctx.tool_registry.tool(name="git_diff", description="查看 workspace 内 Git diff。", display_name="Git差异")
     def git_diff(
         path: str = "",
         staged: bool = False,
@@ -113,7 +113,7 @@ def register_git_tools(registry: ToolRegistry) -> None:
             args.extend(["--", path])
         return _run_git(args, workspace=workspace, max_output_chars=max_output_chars)
 
-    @registry.tool(name="git_log", description="查看 Git 提交日志。", display_name="Git日志")
+    @ctx.tool_registry.tool(name="git_log", description="查看 Git 提交日志。", display_name="Git日志")
     def git_log(
         limit: int = 10,
         workspace: str = ".",
@@ -132,7 +132,7 @@ def register_git_tools(registry: ToolRegistry) -> None:
             max_output_chars=max_output_chars,
         )
 
-    @registry.tool(name="git_show", description="查看某个 Git revision 的内容或统计。", display_name="Git查看")
+    @ctx.tool_registry.tool(name="git_show", description="查看某个 Git revision 的内容或统计。", display_name="Git查看")
     def git_show(
         revision: str = "HEAD",
         stat_only: bool = True,
@@ -149,7 +149,7 @@ def register_git_tools(registry: ToolRegistry) -> None:
         args = ["show", "--stat", revision] if stat_only else ["show", revision]
         return _run_git(args, workspace=workspace, max_output_chars=max_output_chars)
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="git_add",
         description="暂存 workspace 内的指定文件。",
         side_effect=True,
@@ -165,7 +165,7 @@ def register_git_tools(registry: ToolRegistry) -> None:
         _resolve_workspace_path(path, workspace=workspace)
         return _run_git(["add", "--", path], workspace=workspace)
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="git_commit",
         description="创建 Git commit。通常应配合 HITL 审批使用。",
         side_effect=True,

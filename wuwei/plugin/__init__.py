@@ -1,10 +1,10 @@
-"""插件系统"""
+"""插件系统 — wuwei 的统一扩展机制"""
 
-from wuwei.plugin.loader import PluginLoader, Plugin
-from wuwei.plugin.registry import PluginRegistry
+from wuwei.plugin.plugin import Plugin, PluginContext
+from wuwei.plugin.manager import PluginManager
 
 __all__ = [
-    "PluginLoader",
     "Plugin",
-    "PluginRegistry",
+    "PluginContext",
+    "PluginManager",
 ]

@@ -2,7 +2,6 @@
 
 from wuwei.mcp.config import MCPServerConfig, MCPConfig
 from wuwei.mcp.client import BaseMCPClient, StdioMCPClient, HTTPMCPClient
-from wuwei.mcp.tools import MCPToolAdapter
 from wuwei.mcp.session import MCPSessionManager
 
 __all__ = [
@@ -11,6 +10,5 @@ __all__ = [
     "BaseMCPClient",
     "StdioMCPClient",
     "HTTPMCPClient",
-    "MCPToolAdapter",
     "MCPSessionManager",
 ]

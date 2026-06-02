@@ -3,11 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from wuwei.memory.knowledge_store import KnowledgeStore
-from wuwei.tools.registry import ToolRegistry
+from wuwei.plugin import PluginContext
 
 
-def register_rag_tools(registry: ToolRegistry, *, knowledge_store: KnowledgeStore) -> None:
-    @registry.tool(
+def setup(ctx: PluginContext) -> None:
+    knowledge_store = ctx.config.get("knowledge_store")
+    if knowledge_store is None:
+        return  # 未配置知识库，跳过注册
+
+    @ctx.tool_registry.tool(
         name="ingest_document",
         description="将文档导入知识库。支持 txt/md 文件。导入后可用于 RAG 检索。",
         display_name="导入文档",
@@ -23,7 +27,7 @@ def register_rag_tools(registry: ToolRegistry, *, knowledge_store: KnowledgeStor
         chunks = await knowledge_store.ingest(text, source=str(path))
         return {"ok": True, "chunks": len(chunks), "source": str(path)}
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="search_knowledge",
         description="从知识库中检索相关文档片段。",
         display_name="搜索知识库",

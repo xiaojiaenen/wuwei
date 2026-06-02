@@ -9,22 +9,6 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
 
-    @classmethod
-    def from_builtin(cls, names: list[str] | None = None, **kwargs) -> "ToolRegistry":
-        from wuwei.tools.builtin import BUILTIN_TOOL_REGISTRARS
-
-        registry = cls()
-        for name in names or []:
-            try:
-                registrar = BUILTIN_TOOL_REGISTRARS[name]
-            except KeyError as exc:
-                raise ValueError(f"未知的内置工具: {name}") from exc
-            sig = __import__("inspect").signature(registrar)
-            accepted = set(sig.parameters.keys()) - {"registry"}
-            forwarded = {k: v for k, v in kwargs.items() if k in accepted}
-            registrar(registry, **forwarded)
-        return registry
-
     def register(self, tool: Tool) -> Tool:
         if tool.name in self._tools:
             raise ValueError(f"工具 {tool.name} 已经注册了")

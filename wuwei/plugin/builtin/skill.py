@@ -1,3 +1,9 @@
+"""技能插件 — 统一的技能工具注册与提示注入
+
+将技能工具（list_skills, load_skill, load_skill_reference, run_skill_python_script）
+和 SkillPromptMiddleware 整合到一个插件中。
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,8 +12,14 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from wuwei.skill.skill import SkillManager
-from wuwei.tools.registry import ToolRegistry
+from wuwei.core.message import SystemMessage
+from wuwei.middleware import Middleware, MiddlewareContext
+from wuwei.plugin import PluginContext
+
+SKILL_INSTRUCTION = """你可以使用以下技能：
+{skill_text}
+
+使用 view_skill 工具查看技能的详细内容和使用说明。"""
 
 SKILL_SCRIPT_TIMEOUT_SECONDS = 10
 SKILL_SCRIPT_OUTPUT_LIMIT = 4000
@@ -38,7 +50,68 @@ def _truncate_text(text: str, *, limit: int) -> tuple[str, bool]:
     return text[:limit], True
 
 
-def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) -> None:
+def _resolve_skill_file(skill_path: str, relative_path: str, required_dir: str) -> Path:
+    root_dir = Path(skill_path).resolve()
+    target_path = (root_dir / relative_path).resolve()
+
+    if target_path == root_dir or root_dir not in target_path.parents:
+        raise ValueError("文件路径必须位于 skill 目录内")
+    if not target_path.is_file():
+        raise ValueError(f"文件不存在: {relative_path}")
+
+    resolved_relative = target_path.relative_to(root_dir)
+    if not resolved_relative.parts or resolved_relative.parts[0] != required_dir:
+        raise ValueError(f"当前仅允许访问 skill 目录下 {required_dir}/ 中的文件")
+
+    return target_path
+
+
+class SkillPromptMiddleware(Middleware):
+    """技能提示注入中间件
+
+    在 LLM 调用前将可用技能列表注入系统提示词。
+    """
+
+    def __init__(self, skill_manager):
+        self.skill_manager = skill_manager
+        self._injected = False
+
+    async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
+        """LLM 调用前注入技能指引"""
+        if self._injected:
+            return ctx
+
+        skills = self.skill_manager.list_skills()
+        if not skills:
+            return ctx
+
+        skill_lines = []
+        for skill in skills:
+            skill_lines.append(f"- {skill.name}: {skill.description}")
+
+        skill_text = "\n".join(skill_lines)
+        system_prompt = SKILL_INSTRUCTION.format(skill_text=skill_text)
+
+        ctx.state.messages.insert(
+            0,
+            SystemMessage(content=system_prompt),
+        )
+
+        self._injected = True
+        return ctx
+
+
+def setup(ctx: PluginContext) -> None:
+    """注册技能工具和提示注入中间件"""
+    skill_manager = ctx.skill_manager
+    if skill_manager is None:
+        return
+
+    # ── 注册中间件 ──────────────────────────────────────────────
+    if ctx.middleware_stack is not None:
+        ctx.middleware_stack.add(SkillPromptMiddleware(skill_manager))
+
+    # ── 工具内部状态 ────────────────────────────────────────────
     loaded_skill_tokens: dict[str, str] = {}
 
     def _assert_loaded(skill_name: str, load_token: str) -> None:
@@ -47,22 +120,9 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
                 "使用 skill 附属资源前必须先调用 load_skill，并使用 load_skill 返回的 load_token。"
             )
 
-    def _resolve_skill_file(skill_path: str, relative_path: str, required_dir: str) -> Path:
-        root_dir = Path(skill_path).resolve()
-        target_path = (root_dir / relative_path).resolve()
+    # ── 注册工具 ────────────────────────────────────────────────
 
-        if target_path == root_dir or root_dir not in target_path.parents:
-            raise ValueError("文件路径必须位于 skill 目录内")
-        if not target_path.is_file():
-            raise ValueError(f"文件不存在: {relative_path}")
-
-        resolved_relative = target_path.relative_to(root_dir)
-        if not resolved_relative.parts or resolved_relative.parts[0] != required_dir:
-            raise ValueError(f"当前仅允许访问 skill 目录下 {required_dir}/ 中的文件")
-
-        return target_path
-
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="list_skills",
         description="列出当前可用技能的摘要。先查看技能列表，再自行判断是否需要某个 skill。",
         display_name="列出技能",
@@ -82,7 +142,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             )
         return items
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="load_skill",
         description="根据技能名称加载技能正文。选中 skill 后再调用这个工具。",
         display_name="加载技能",
@@ -104,7 +164,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             "references": skill.references,
         }
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="load_skill_reference",
         description=(
             "读取已加载 skill 的 references/ 目录中的单个参考文件。"
@@ -137,7 +197,7 @@ def register_skill_tools(registry: ToolRegistry, skill_manager: SkillManager) ->
             "size_chars": len(text),
         }
 
-    @registry.tool(
+    @ctx.tool_registry.tool(
         name="run_skill_python_script",
         description=(
             "执行 skill 目录下 scripts/ 中的 Python 脚本。"

@@ -210,29 +210,33 @@ asyncio.run(test_sandbox())
 
 # ═══════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("Test 5: Plugin — PluginLoader + PluginRegistry 完整流程")
+print("Test 5: Plugin — PluginManager + PluginContext 完整流程")
 print("=" * 60)
 
 def test_plugins():
-    from wuwei.plugin.loader import PluginLoader
-    from wuwei.plugin.registry import PluginRegistry
+    from wuwei.plugin import Plugin, PluginContext, PluginManager
+    from wuwei.tools import ToolRegistry
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # PluginRegistry
-        registry = PluginRegistry()
-        check("PluginRegistry 创建", registry is not None)
-        check("PluginRegistry 有 register 方法", hasattr(registry, 'register'))
-        check("PluginRegistry 有 list_plugins 方法", hasattr(registry, 'list_plugins'))
-        check("PluginRegistry 有 list_hooks 方法", hasattr(registry, 'list_hooks'))
+        # PluginContext
+        registry = ToolRegistry()
+        ctx = PluginContext(tool_registry=registry)
+        check("PluginContext 创建", ctx is not None)
+        check("PluginContext 有 tool_registry", hasattr(ctx, 'tool_registry'))
 
-        # PluginLoader
-        loader = PluginLoader(plugins_dir=tmpdir)
-        check("PluginLoader 创建", loader is not None)
-        check("PluginLoader plugins_dir 正确", str(loader.plugins_dir) == tmpdir)
+        # PluginManager
+        pm = PluginManager(ctx)
+        check("PluginManager 创建", pm is not None)
+        check("PluginManager 有 register 方法", hasattr(pm, 'register'))
+        check("PluginManager 有 list_plugins 方法", hasattr(pm, 'list_plugins'))
 
-        # load_all — should not crash on empty dir
-        discovered = loader.load_all()
-        check("PluginLoader.load_all 空目录", isinstance(discovered, list))
+        # load_directory — should not crash on empty dir
+        discovered = pm.load_directory(tmpdir)
+        check("PluginManager.load_directory 空目录", isinstance(discovered, list))
+
+        # Plugin data model
+        p = Plugin(name="test", description="test plugin")
+        check("Plugin 创建", p.name == "test")
 
     print("  Plugin 全部通过 ✅")
 
