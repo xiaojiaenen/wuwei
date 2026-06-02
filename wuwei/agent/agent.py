@@ -30,6 +30,7 @@ class Agent(BaseSessionAgent):
         mcp_manager=None,
         plugins: list[Plugin] | None = None,
         plugin_dir: str | Path | None = None,
+        load_builtins: bool = True,
     ) -> None:
         super().__init__(
             llm=llm,
@@ -52,7 +53,11 @@ class Agent(BaseSessionAgent):
             middleware_stack=self.middleware,
         )
         pm = PluginManager(ctx)
-        load_all_builtin(pm)  # 始终加载内置插件
+
+        # 仅在需要时加载内置插件
+        # 当调用方已自行管理工具注册（如传入预填充的 ToolRegistry），可跳过
+        if load_builtins:
+            load_all_builtin(pm)
 
         if plugins:
             for p in plugins:
