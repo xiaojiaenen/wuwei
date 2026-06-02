@@ -53,27 +53,33 @@ class TestToolModule:
 
     def test_tool_from_function(self):
         """测试从函数创建工具"""
-        from wuwei.tools.base import Tool, tool
+        from wuwei.tools.tool import Tool
+        from wuwei.tools.registry import ToolRegistry
 
-        @tool
+        registry = ToolRegistry()
+
+        @registry.tool(description="测试函数")
         def my_func(x: int, y: str = "default") -> str:
             """测试函数"""
             return f"{x} {y}"
 
-        assert my_func.name == "my_func"
-        schema = my_func.to_openai_schema()
+        registered = registry.get("my_func")
+        assert registered is not None
+        assert registered.name == "my_func"
+        schema = registered.to_schema()
         assert "function" in schema
         assert "parameters" in schema["function"]
 
     def test_tool_registry(self):
         """测试工具注册表"""
-        from wuwei.tools.base import Tool
+        from wuwei.tools.tool import Tool, ToolParameters
         from wuwei.tools.registry import ToolRegistry
 
         registry = ToolRegistry()
         tool = Tool(
             name="test",
             description="test tool",
+            parameters=ToolParameters(),
             handler=lambda: None,
         )
         registry.register(tool)
@@ -257,18 +263,41 @@ class TestBuiltinTools:
 
     def test_json_tools(self):
         """测试 JSON 工具"""
-        from wuwei.tools.builtin.json_tools import JSON_TOOLS
-        assert len(JSON_TOOLS) == 2
+        from wuwei.tools import ToolRegistry
+        from wuwei.plugin import PluginContext
+        from wuwei.plugin.builtin.json_tools import setup as setup_json
+
+        registry = ToolRegistry()
+        setup_json(PluginContext(tool_registry=registry))
+        tools = registry.list_tools()
+        names = [t.name for t in tools]
+        assert "json_parse" in names
+        assert "json_extract" in names
 
     def test_http_tools(self):
         """测试 HTTP 工具"""
-        from wuwei.tools.builtin.http_tools import HTTP_TOOLS
-        assert len(HTTP_TOOLS) == 2
+        from wuwei.tools import ToolRegistry
+        from wuwei.plugin import PluginContext
+        from wuwei.plugin.builtin.http import setup as setup_http
+
+        registry = ToolRegistry()
+        setup_http(PluginContext(tool_registry=registry))
+        tools = registry.list_tools()
+        assert len(tools) >= 2
 
     def test_text_tools(self):
         """测试文本工具"""
-        from wuwei.tools.builtin.text_tools import TEXT_TOOLS
-        assert len(TEXT_TOOLS) == 6
+        from wuwei.tools import ToolRegistry
+        from wuwei.plugin import PluginContext
+        from wuwei.plugin.builtin.text import setup as setup_text
+
+        registry = ToolRegistry()
+        setup_text(PluginContext(tool_registry=registry))
+        tools = registry.list_tools()
+        names = [t.name for t in tools]
+        assert "text_replace" in names
+        assert "text_upper" in names
+        assert len(tools) >= 5
 
 
 class TestEndToEnd:

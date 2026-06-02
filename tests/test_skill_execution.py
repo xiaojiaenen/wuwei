@@ -11,8 +11,8 @@ load_dotenv(os.path.join(_wuwei_root, '.env'))
 
 from wuwei.skill import SkillManager, FileSystemSkillProvider
 from wuwei.tools import ToolRegistry
-from wuwei.tools.builtin import register_skill_tools
-from wuwei.middleware.skill import SkillMiddleware
+from wuwei.plugin import PluginContext
+from wuwei.plugin.builtin.skill import SkillPromptMiddleware, setup as setup_skill_plugin
 from wuwei.middleware import MiddlewareStack
 from wuwei.agent import Agent, AgentSession
 from wuwei.llm import LLMGateway, Message
@@ -52,7 +52,7 @@ async def test_example_skill():
     
     # 注册 skill 工具
     registry = ToolRegistry()
-    register_skill_tools(registry, manager)
+    setup_skill_plugin(PluginContext(tool_registry=registry, skill_manager=manager))
     
     # list_skills 工具
     list_result = await registry.get("list_skills").invoke({})
@@ -93,7 +93,7 @@ asyncio.run(test_example_skill())
 
 # ═══════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("Test 2: SkillMiddleware 集成到 Agent（LLM 调用）")
+print("Test 2: SkillPromptMiddleware 集成到 Agent（LLM 调用）")
 print("=" * 60)
 
 async def test_skill_middleware_with_llm():
@@ -120,7 +120,7 @@ async def test_skill_middleware_with_llm():
         def load_skill_instruction(self, name): return skill.instruction
     
     manager = SkillManager([MockProvider()])
-    skill_mw = SkillMiddleware(skill_manager=manager)
+    skill_mw = SkillPromptMiddleware(skill_manager=manager)
     
     stack = MiddlewareStack()
     stack.add(skill_mw)
@@ -135,16 +135,16 @@ async def test_skill_middleware_with_llm():
     result = await agent.run("用一句话介绍人工智能")
     check("Agent 正常返回", result.content is not None and len(result.content) > 0)
     
-    # SkillMiddleware 注入验证：检查 agent 运行的 session 状态
+    # SkillPromptMiddleware 注入验证：检查 agent 运行的 session 状态
     # skill 注入发生在 ctx.state.messages（LLM 实际收到的消息），
     # 而非 session.context（持久化存储）。因此验证 agent 正常完成即可。
     # 详细的 before_llm 注入测试见 test_skill_integration.py
-    check("Agent 在 SkillMiddleware 下正常完成", result.llm_calls >= 1)
+    check("Agent 在 SkillPromptMiddleware 下正常完成", result.llm_calls >= 1)
     
     text = result.content[:150]
     print(f"   回复: {text}")
     
-    print("  SkillMiddleware + Agent LLM 集成 通过 ✅")
+    print("  SkillPromptMiddleware + Agent LLM 集成 通过 ✅")
 
 asyncio.run(test_skill_middleware_with_llm())
 

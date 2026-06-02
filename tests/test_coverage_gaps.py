@@ -91,9 +91,8 @@ print("Test 2: Skill — SkillViewerTool / FileSystemSkillProvider 完整流程"
 print("=" * 60)
 
 async def test_skill_viewer():
-    """测试 SkillViewerTool + FileSystemSkillProvider 完整流程"""
+    """测试 FileSystemSkillProvider 完整流程"""
     from wuwei.skill import Skill, SkillManager, FileSystemSkillProvider
-    from wuwei.skill.viewer import SkillViewerTool
     from wuwei.tools import ToolRegistry, ToolExecutor
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -134,11 +133,6 @@ Use this skill when you need to demo something.
         # 加载指令
         instruction = manager.load_skill_instruction("demo-skill")
         check("加载了 skill 指令", instruction is not None and "Demo Skill" in instruction)
-
-        # SkillViewerTool (skipped: has init bug in framework)
-        check("SkillViewerTool 可导入", SkillViewerTool is not None)
-        # SkillViewerTool has a bug where it sets self.skill_manager 
-        # on a Pydantic BaseModel without declaring the field
 
     print("  Skill 系统 全部通过 ✅")
 
@@ -313,10 +307,13 @@ print("Test 8: @tool 装饰器 / Tool.from_function")
 print("=" * 60)
 
 def test_tool_decorator():
-    from wuwei.tools.base import tool, Tool as BaseTool
+    from wuwei.tools.tool import Tool as BaseTool
+    from wuwei.tools.registry import ToolRegistry
 
-    # @tool 装饰器 (returns base.Tool)
-    @tool
+    registry = ToolRegistry()
+
+    # @registry.tool 装饰器
+    @registry.tool(description="Greet someone with a custom greeting.")
     def greet(name: str, greeting: str = "Hello") -> str:
         """Greet someone with a custom greeting.
 
@@ -326,28 +323,36 @@ def test_tool_decorator():
         """
         return f"{greeting}, {name}!"
 
-    check("@tool 创建了 Tool", isinstance(greet, BaseTool))
-    check("Tool 名称", greet.name == "greet")
-    check("Tool 描述", "Greet someone" in greet.description)
+    greet_tool = registry.get("greet")
+    check("@tool 创建了 Tool", isinstance(greet_tool, BaseTool))
+    check("Tool 名称", greet_tool.name == "greet")
+    check("Tool 描述", "Greet someone" in greet_tool.description)
 
-    # from_function (on base.Tool)
+    # Tool 通过构造函数创建
     def add(a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
 
-    add_tool = BaseTool.from_function(add)
-    check("from_function 创建 Tool", add_tool is not None)
-    check("from_function Tool name", add_tool.name == "add")
+    registry2 = ToolRegistry()
+
+    @registry2.tool(description="Add two numbers.")
+    def add_tool(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    add_registered = registry2.get("add_tool")
+    check("Tool 注册成功", add_registered is not None)
+    check("Tool name", add_registered.name == "add_tool")
 
     # Tool 有 schema/工具定义能力
-    check("Tool 有 name", hasattr(add_tool, 'name'))
-    check("Tool 有 description", hasattr(add_tool, 'description'))
-    check("Tool 有 parameters", hasattr(add_tool, 'parameters'))
+    check("Tool 有 name", hasattr(add_registered, 'name'))
+    check("Tool 有 description", hasattr(add_registered, 'description'))
+    check("Tool 有 parameters", hasattr(add_registered, 'parameters'))
 
-    # Tool.invoke returns str
+    # Tool.invoke returns result
     import asyncio
-    result = asyncio.run(add_tool.invoke({"a": 3, "b": 4}))
-    check("Tool.invoke 正确", result == "7")
+    result = asyncio.run(add_registered.invoke({"a": 3, "b": 4}))
+    check("Tool.invoke 正确", result == 7)
 
     print("  @tool 装饰器 全部通过 ✅")
 

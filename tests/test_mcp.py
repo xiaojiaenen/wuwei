@@ -155,7 +155,7 @@ class TestMCPSessionManager:
 
     def test_get_all_tools(self):
         """测试获取所有工具"""
-        from wuwei.tools.base import Tool
+        from wuwei.tools.tool import Tool, ToolParameters
 
         config = MCPConfig()
         session = MCPSessionManager(config)
@@ -165,6 +165,7 @@ class TestMCPSessionManager:
             Tool(
                 name="tool1",
                 description="test",
+                parameters=ToolParameters(),
                 handler=lambda: None,
             )
         ]

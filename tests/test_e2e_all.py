@@ -931,20 +931,23 @@ async def test_context_compression_middleware():
 async def test_builtin_tools():
     """测试内置工具注册和执行"""
     from wuwei.tools import ToolRegistry, ToolExecutor
-    from wuwei.tools.builtin import register_calc_tools, register_time_tools
-    from wuwei.tools.builtin.json_tools import JSON_TOOLS
-    from wuwei.tools.builtin.text_tools import TEXT_TOOLS
+    from wuwei.plugin import PluginContext
+    from wuwei.plugin.builtin.calc import setup as setup_calc
+    from wuwei.plugin.builtin.time_plugin import setup as setup_time
+    from wuwei.plugin.builtin.json_tools import setup as setup_json
+    from wuwei.plugin.builtin.text import setup as setup_text
+    from wuwei.plugin.builtin.http import setup as setup_http
 
     registry = ToolRegistry()
-    register_calc_tools(registry)
-    register_time_tools(registry)
-    for t in TEXT_TOOLS:
-        registry.register(t)
-    for t in JSON_TOOLS:
-        registry.register(t)
+    ctx = PluginContext(tool_registry=registry)
+    setup_calc(ctx)
+    setup_time(ctx)
+    setup_json(ctx)
+    setup_text(ctx)
+    setup_http(ctx)
 
     tools = registry.list_tools()
-    assert len(tools) >= 4
+    assert len(tools) >= 6
 
     executor = ToolExecutor(registry)
 
@@ -961,10 +964,10 @@ async def test_builtin_tools():
     # 测试文本工具
     tc2 = ToolCall(
         id="text_1",
-        function=FunctionCall(name="count_words", arguments={"text": "hello world test"}),
+        function=FunctionCall(name="text_upper", arguments={"text": "hello world test"}),
     )
     result2 = await executor.execute_one(tc2)
-    assert "3" in result2.content or "ok" in result2.content.lower()
+    assert "HELLO WORLD TEST" in result2.content or "ok" in result2.content.lower()
 
     print("  ✅ Builtin Tools: calc + time + text + json 注册和执行 通过")
 

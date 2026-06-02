@@ -4,12 +4,12 @@ import pytest
 
 from wuwei.agent.session import AgentSession
 from wuwei.middleware import MiddlewareStack
-from wuwei.middleware.skill import SkillMiddleware
+from wuwei.plugin import PluginContext
+from wuwei.plugin.builtin.skill import SkillPromptMiddleware, setup as setup_skill_plugin
+from wuwei.plugin.builtin import skill as skill_tools_module
 from wuwei.skill.fs_provider import FileSystemSkillProvider
 from wuwei.skill.skill import SkillManager, Skill
 from wuwei.tools import ToolRegistry
-from wuwei.tools.builtin import register_skill_tools
-from wuwei.tools.builtin import skill_tools as skill_tools_module
 
 
 @pytest.mark.asyncio
@@ -29,7 +29,7 @@ async def test_skill_middleware_injects_skill_guidance() -> None:
     manager = SkillManager([MockProvider()])
 
     # 创建中间件
-    middleware = SkillMiddleware(skill_manager=manager)
+    middleware = SkillPromptMiddleware(skill_manager=manager)
 
     # 创建会话
     session = AgentSession(
@@ -87,7 +87,7 @@ async def test_skill_tools_list_load_and_run_python_script(tmp_path) -> None:
     provider = FileSystemSkillProvider(str(tmp_path))
     manager = SkillManager([provider])
     registry = ToolRegistry()
-    register_skill_tools(registry, manager)
+    setup_skill_plugin(PluginContext(tool_registry=registry, skill_manager=manager))
 
     list_result = await registry.get("list_skills").invoke({})
     load_result = await registry.get("load_skill").invoke({"skill_name": "weather_analyst"})
@@ -147,7 +147,7 @@ async def test_run_skill_python_script_requires_load_token(tmp_path) -> None:
     provider = FileSystemSkillProvider(str(tmp_path))
     manager = SkillManager([provider])
     registry = ToolRegistry()
-    register_skill_tools(registry, manager)
+    setup_skill_plugin(PluginContext(tool_registry=registry, skill_manager=manager))
 
     with pytest.raises(ValueError, match="必须先调用 load_skill"):
         await registry.get("run_skill_python_script").invoke(
@@ -182,7 +182,7 @@ async def test_skill_tools_timeout_and_output_truncation(tmp_path, monkeypatch) 
     provider = FileSystemSkillProvider(str(tmp_path))
     manager = SkillManager([provider])
     registry = ToolRegistry()
-    register_skill_tools(registry, manager)
+    setup_skill_plugin(PluginContext(tool_registry=registry, skill_manager=manager))
 
     load_result = await registry.get("load_skill").invoke({"skill_name": "weather_analyst"})
     load_token = load_result["load_token"]
