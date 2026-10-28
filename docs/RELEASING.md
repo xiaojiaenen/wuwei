@@ -16,7 +16,7 @@
 
 ## 验证配置文件，不上传
 
-在 GitHub Actions → Publish to PyPI → Run workflow，选择包含新工作流的分支。手动运行只测试、构建和存储产物，**不发布**。首次合并前可在功能分支运行。
+先将工作流合并到默认分支 `master`，再在 GitHub Actions → Publish to PyPI → Run workflow 选择待验证分支。手动运行只测试、构建和存储产物，**不发布**；GitHub 要求工作流先存在于默认分支，才能手动触发。
 
 ## 正式发布
 
