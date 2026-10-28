@@ -1,4 +1,4 @@
-# 迁移到 Wuwei 3.2
+# 迁移到 Wuwei 3.3
 
 先在独立环境升级并运行本地回归，再切换业务流量。保留旧检查点、会话数据与供应商配置的恢复副本。
 
@@ -54,7 +54,7 @@ pytest --live
 
 依赖范围以 pyproject.toml 为准：OpenAI/Anthropic 的声明下限对应当前测试版本；不把本地 fake/MockTransport 测试解释成所有兼容网关已验收。
 
-## 未发布功能的迁移注意事项
+## 3.3 新功能的迁移注意事项
 
 - 普通工具返回的status/ok字段只属于业务正文。自定义中间件要表达执行unknown/error时，改用ToolOutcome或显式trusted tool_outcome信封。
 - run_structured在真实LLMGateway上默认auto模式。若输出是开放字典或提供商不支持严格schema，明确选output_mode="prompted"；旧自定义LLM保留提示后校验。
@@ -63,4 +63,4 @@ pytest --live
 - rubric默认需要judge；允许缺失时设judge_required=False，报告记为skipped而不是通过门禁。baseline用例名必须唯一。
 - RunState v1快照可迁移到v2，不支持的未来版本明确拒绝。上线前保留原检查点和会话备份，不把新快照交给旧运行时重放。
 - SessionStore、ArtifactStore和JobStore的namespace/owner由可信宿主鉴权后提供；不替代账号、租户或审批人权限验证。
-- 参见[持久运行指南](docs/guides/durable-execution.md)和[模型契约](docs/model-contracts.md)。新增功能尚未发布到PyPI。
+- 参见[持久运行指南](docs/guides/durable-execution.md)和[模型契约](docs/model-contracts.md)。上述新能力从3.3.0开始提供。
