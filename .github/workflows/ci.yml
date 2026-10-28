@@ -16,9 +16,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: pyproject.toml
       - name: Install
         run: |
-          uv venv --python ${{ matrix.python-version }} .venv
           uv pip install --python .venv/bin/python -e '.[dev,anthropic,mcp]'
       - name: Fatal lint checks
         run: .venv/bin/ruff check wuwei/ --select E9,F63,F7,F82
