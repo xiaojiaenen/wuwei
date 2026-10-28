@@ -1,27 +1,58 @@
 from typing import Any, Literal
+from typing_extensions import TypedDict
 
 from pydantic import BaseModel, Field
 
-# 从 core.message 导入统一的消息类型
-from wuwei.core.message import BaseMessage as Message, FunctionCall, ToolCall
+# 从 core.message 导入统一的消息类型（再导出，供外部统一从 wuwei.llm 导入）
+from wuwei.core.message import BaseMessage as Message
+from wuwei.core.message import FunctionCall, ToolCall
+
+__all__ = [
+    "Message",
+    "FunctionCall",
+    "ToolCall",
+    "LLMResponse",
+    "LLMResponseChunk",
+    "AgentEvent",
+    "AgentEventType",
+    "AgentRunResult",
+    "normalize_finish_reason",
+]
 
 
-class LLMResponse(BaseModel):
-    message: Message
-    finish_reason: Literal["stop", "tool_calls", "length", "content_filter"]
+from wuwei.core.types import LLMResponse, normalize_finish_reason
+
+
+class ToolCallDelta(TypedDict, total=False):
+    index: int
+    id: str
+    name: str
+    arguments: str
+
+
+class AdapterEvent(TypedDict, total=False):
+    """Provider-normalized event. Usage fields are cumulative, never increments."""
+
+    content: str
+    reasoning_content: str
+    tool_calls_delta: list[ToolCallDelta] | None
+    finish_reason: str | None
+    raw_finish_reason: str | None
+    provider_metadata: dict[str, Any]
     usage: dict[str, int]
-    model: str
-    latency_ms: int
 
 
 class LLMResponseChunk(BaseModel):
+    metadata: dict[str, Any] = Field(default_factory=dict)
     content: str
     reasoning_content: str | None = None
-    tool_calls_delta: list[dict[str, Any]] | str | None = (
+    tool_calls_delta: list[ToolCallDelta] | None = (
         None  # 每个元素的格式：{"index": int, "id": str, "name": str, "arguments": str}
     )
     tool_calls_complete: list[ToolCall] | None = None
-    finish_reason: Literal["stop", "tool_calls", "length", "content_filter"] | None = None
+    finish_reason: str | None = None
+    raw_finish_reason: str | None = None
+    usage_available: bool = False
     usage: dict[str, int] | None = None
 
 
@@ -52,6 +83,7 @@ class AgentEvent(BaseModel):
 
 
 class AgentRunResult(BaseModel):
+    usage_available: bool = True
     content: str
     usage: dict[str, int] = Field(
         default_factory=lambda: {
@@ -62,3 +94,9 @@ class AgentRunResult(BaseModel):
     )
     latency_ms: int = 0
     llm_calls: int = 0
+    status: Literal["completed", "interrupted", "error", "incomplete", "cancelled", "unknown"] = (
+        "completed"
+    )
+    interrupt: dict[str, Any] | None = None
+    termination_reason: str | None = None
+    output: Any = None

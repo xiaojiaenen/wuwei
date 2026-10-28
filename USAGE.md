@@ -1,550 +1,150 @@
-# Wuwei 2.1 用户使用文档
+# Wuwei 使用指南
 
-> Wuwei - 无为而治的 AI 智能体框架
-
-## 目录
-
-- [快速开始](#快速开始)
-- [核心概念](#核心概念)
-- [LLM 网关](#llm-网关)
-- [工具系统](#工具系统)
-- [状态图编排](#状态图编排)
-- [中间件系统](#中间件系统)
-- [Output Parsers](#output-parsers)
-- [插件系统](#插件系统)
-- [上下文压缩](#上下文压缩)
-- [MCP 支持](#mcp-支持)
-- [技能系统](#技能系统)
-- [多平台网关](#多平台网关)
-- [示例代码](#示例代码)
-
-## 快速开始
-
-### 安装
-
-```bash
-# 最小安装
-pip install wuwei
-
-# 按需安装扩展
-pip install wuwei[graph]        # 状态图
-pip install wuwei[middleware]   # 中间件
-pip install wuwei[mcp]          # MCP 支持
-pip install wuwei[all]          # 全部扩展
-```
-
-### 最小示例
-
-```python
-import asyncio
-from wuwei import Agent, LLMGateway, tool
-
-# 定义工具
-@tool
-def get_weather(city: str) -> str:
-    """获取城市天气"""
-    return f"{city} 今天晴天，25°C"
-
-# 创建 Agent
-llm = LLMGateway.from_env()
-agent = Agent(llm=llm, tools=[get_weather])
-
-# 运行
-async def main():
-    result = await agent.run("北京今天天气怎么样？")
-    print(result)
-
-asyncio.run(main())
-```
-
-## 核心概念
-
-### Runnable 接口
-
-所有可执行组件都实现 Runnable 接口：
-
-```python
-from wuwei.core import Runnable, RunnableConfig
-
-class MyRunnable(Runnable):
-    async def invoke(self, input, config=None):
-        return f"处理: {input}"
-
-# 使用管道操作符
-chain = MyRunnable() | MyRunnable()
-result = await chain.invoke("hello")
-```
-
-### 消息体系
-
-```python
-from wuwei.core import (
-    BaseMessage,
-    AIMessage,
-    ToolMessage,
-    SystemMessage,
-    HumanMessage,
-    ToolCall,
-    FunctionCall,
-)
-
-# 创建消息
-user_msg = HumanMessage(content="你好")
-ai_msg = AIMessage(content="你好！")
-
-# 转换为 OpenAI 格式
-openai_format = user_msg.to_openai()
-```
-
-### 错误处理
-
-```python
-from wuwei.core import (
-    WuweiError,
-    ToolError,
-    LLMError,
-    TimeoutError,
-    ValidationError,
-)
-
-try:
-    result = await agent.run("test")
-except ToolError as e:
-    print(f"工具错误: {e}")
-except LLMError as e:
-    print(f"LLM 错误: {e}")
-```
-
-## LLM 网关
-
-### 多提供商支持
+## 选择模型和资源所有权
 
 ```python
 from wuwei import LLMGateway
 
-# OpenAI（默认）
 llm = LLMGateway.from_env(provider="openai")
-
-# Anthropic
-llm = LLMGateway.from_env(provider="anthropic")
-
-# 智谱 AI
-llm = LLMGateway.from_env(provider="zhipu")
-
-# 阿里云 DashScope
-llm = LLMGateway.from_env(provider="dashscope")
-
-# Ollama（本地模型）
-llm = LLMGateway.from_env(provider="ollama")
+# provider="responses" 使用 Responses API；provider="anthropic" 使用 Claude。
+# 兼容端点：from_env(provider="openai", env_prefix="DEEPSEEK")
 ```
 
-### 配置文件方式
+环境变量使用 `<PREFIX>_API_KEY`、`<PREFIX>_BASE_URL`、`<PREFIX>_MODEL`。显式配置可传 `LLMGateway({...})`，不要把认证信息写进源文件。
+
+需要自定义认证、代理或连接池时，优先传 `client` 或 `client_factory`，而不是修改消息转换器：
 
 ```python
+from openai import AsyncOpenAI
 from wuwei import LLMGateway
 
-llm = LLMGateway({
-    "provider": "zhipu",
-    "api_key": "your-api-key",
-    "model": "glm-4",
-    "temperature": 0.7,
-    "max_tokens": 2048,
-})
+client = AsyncOpenAI(max_retries=0)  # 从环境变量读取认证
+llm = LLMGateway({"provider": "openai", "client": client,
+                  "model": "gpt-4o", "temperature": 0.2,
+                  "retry": {"max_attempts": 2}, "timeout": 30})
+# 使用完 await llm.aclose()；借入 client 默认由调用方 await client.close()。
 ```
 
-## 工具系统
+框架自建 SDK client 默认关闭 SDK 重试，让网关负责分类重试。借入客户端也应明确 retry 所有权；否则 SDK 与框架尝试次数可能相乘。`set_fallback(other_gateway)` 借用完整 fallback 策略，调用方管理 other_gateway 生命周期。已发布流式内容、工具或 usage 元数据后不重放请求。确定性参数错误不做传输重试。
 
-### 使用 @tool 装饰器
+## 注册有参数契约的工具
 
 ```python
-from wuwei import tool
+from wuwei import ToolRegistry
 
-@tool
-def search(query: str, max_results: int = 5) -> str:
-    """搜索文档
+registry = ToolRegistry()
 
-    Args:
-        query: 搜索关键词
-        max_results: 最大结果数
-    """
-    return f"找到 {max_results} 个结果"
+@registry.tool(side_effect=False)
+def join_names(names: list[str], separator: str = ", ") -> str:
+    """连接姓名列表。"""
+    return separator.join(names)
 
-@tool(name="custom_name", description="自定义描述")
-def my_func(x: int) -> str:
-    return str(x)
+assert registry.get("join_names").parameters.properties["names"]["type"] == "array"
 ```
 
-### 手动定义工具
+传 `Agent(llm=llm, tools=registry)`。`registry.register_callable(func)` 适合不能使用装饰器的函数；复杂远程 schema 可显式构造 `Tool` 和 `ToolParameters`。参数先验证再执行，同步 handler 在线程中执行。
+
+写入类工具声明 `side_effect=True`，按需设置 `requires_approval=True`、`timeout_seconds`。超时不保证线程或远端动作停止；unknown 结果必须先对账。框架不会盲目重试已声明的副作用工具。
+
+`load_builtins="minimal"` 为默认策略。可用 `load_builtins=["calc", "file"]` 按名选择，或 False 完全禁用内置插件。增加插件不等于授予业务权限。
+
+## 让普通运行和流式共享会话
 
 ```python
-from wuwei import Tool
+from wuwei import Agent
 
-tool = Tool(
-    name="search",
-    description="搜索文档",
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
-        },
-        "required": ["query"],
-    },
-    handler=search_func,
-    timeout_seconds=30.0,
-    requires_approval=False,
-)
+agent = Agent(llm=llm, tools=registry, load_builtins=False)
+session = agent.create_session()
+# 在 async 函数中：
+# first = await agent.run("记住项目名 Wuwei", session=session)
+# async for event in agent.stream_events("项目叫什么？", session=session):
+#     print(event.type, event.data)
 ```
 
-### 从函数自动生成
+两入口不传 session 时也复用 Agent 默认会话。HTTP AG-UI 的 threadId 映射到 session_id；应用仍负责验证线程归属和访问身份。完整消费事件流到 terminal，提前退出应关闭生成器；text_delta 不是执行完成证明。
+
+`AgentRunResult` 包含 content、status、usage、llm_calls、latency_ms、interrupt、termination_reason、output。下游只将 completed 当完成；interrupted 保留审批信息，incomplete 表示未完成，unknown 表示结果不确定。
+
+## 结构化输出仍经过同一运行链路
 
 ```python
-from wuwei import Tool
-
-def search(query: str, max_results: int = 5) -> str:
-    """搜索文档"""
-    return "结果"
-
-tool = Tool.from_function(search)
-```
-
-## 状态图编排
-
-### 基本用法
-
-```python
-from wuwei.graph import StateGraph, State, END
-
-# 定义节点
-async def llm_node(state: State, config: dict) -> State:
-    # 调用 LLM
-    return state
-
-async def tool_node(state: State, config: dict) -> State:
-    # 执行工具
-    return state
-
-# 构建图
-graph = StateGraph(State)
-graph.add_node("llm", llm_node)
-graph.add_node("tool", tool_node)
-graph.add_edge("llm", "tool")
-graph.add_edge("tool", END)
-graph.set_entry_point("llm")
-
-# 编译并执行
-app = graph.compile()
-state = await app.invoke(State())
-```
-
-### 条件边
-
-```python
-async def should_continue(state: State) -> str:
-    """根据状态决定下一步"""
-    last_msg = state.get_last_ai_message()
-    if last_msg and last_msg.tool_calls:
-        return "tool"
-    return "end"
-
-graph.add_conditional_edges(
-    "llm",
-    should_continue,
-    {"tool": "tool", "end": END},
-)
-```
-
-### 检查点
-
-```python
-from wuwei.graph import StateGraph, MemoryCheckpointer
-
-graph = StateGraph(State)
-# ... 添加节点和边
-
-app = graph.compile()
-app.set_checkpointer(MemoryCheckpointer())
-
-# 执行时自动保存检查点
-state = await app.invoke(State())
-```
-
-## 中间件系统
-
-### 基本用法
-
-```python
-from wuwei.middleware import Middleware, MiddlewareContext, MiddlewareStack
-
-class MyMiddleware(Middleware):
-    async def before_llm(self, ctx):
-        # LLM 调用前
-        return ctx
-
-    async def after_llm(self, ctx, response):
-        # LLM 调用后
-        return ctx
-
-# 创建中间件栈
-stack = MiddlewareStack()
-stack.add(MyMiddleware())
-
-# 使用
-agent = Agent(llm=llm, tools=tools, middleware=stack)
-```
-
-### 内置中间件
-
-```python
-from wuwei.middleware import LoggingMiddleware
-from wuwei.middleware.hitl import HitlMiddleware
-
-# 日志中间件
-stack.add(LoggingMiddleware())
-
-# HITL 中间件
-async def approval_provider(tool_call):
-    print(f"是否允许 {tool_call.function.name}? (y/n)")
-    return input().lower() == "y"
-
-stack.add(HitlMiddleware(
-    approval_provider=approval_provider,
-    auto_approve_tools=["safe_tool"],
-    auto_reject_tools=["dangerous_tool"],
-))
-```
-
-## Output Parsers
-
-### JSON 解析
-
-```python
-from wuwei.parsers import JsonOutputParser
-
-parser = JsonOutputParser()
-result = parser.parse('{"name": "test", "value": 123}')
-# result = {"name": "test", "value": 123}
-```
-
-### Pydantic 验证
-
-```python
-from wuwei.parsers import PydanticOutputParser
 from pydantic import BaseModel
 
-class User(BaseModel):
-    name: str
-    age: int
+class Summary(BaseModel):
+    title: str
+    points: list[str]
 
-parser = PydanticOutputParser(schema=User)
-result = parser.parse('{"name": "test", "age": 25}')
-# result = User(name="test", age=25)
+# 在 async 函数中：
+# output, result = await agent.run_structured("总结当前会话", Summary, session=session)
+# if result.status == "completed":
+#     print(output.title)
+# elif result.status == "interrupted":
+#     assert output is None
 ```
 
-### 列表解析
+返回 `(Summary | None, AgentRunResult)`；校验纠正调用计入同一 run 预算。JSON 提示与验证不等于每个 provider 都支持原生严格 schema。
+
+## 审批、权限和恢复
 
 ```python
-from wuwei.parsers import ListOutputParser
+from wuwei import Agent, HitlMiddleware, MiddlewareStack
+from wuwei.graph import SQLiteCheckpointer
 
-parser = ListOutputParser()
-result = parser.parse("item1, item2, item3")
-# result = ["item1", "item2", "item3"]
+stack = MiddlewareStack()
+stack.add(HitlMiddleware(mode="interrupt", approval_policy="declared"))
+checkpointer = SQLiteCheckpointer("checkpoints.sqlite")
+agent = Agent(llm=llm, tools=registry, middleware=stack,
+              checkpointer=checkpointer, load_builtins=False)
+# result = await agent.run("执行任务")
+# if result.status == "interrupted":
+#     result = await agent.resume(result.interrupt, approved=True)
 ```
 
-## 插件系统
+审批决定绑定具体挂起动作；恢复仍通过其他治理。SQLite 后端支持原子 claim；自定义持久化后端必须实现可靠原子领取，不能用普通 load/save 冒充防重。应用要验证审批人、会话归属，保护检查点和恢复凭证。检查点不能解决外部成功、本地结果未落盘的跨系统窗口；unknown 状态需目的端幂等键或权威对账。
 
-### 创建插件
+`PermissionMiddleware(PermissionConfig(...))` 控制能力授权、workspace 内目录/网络边界、配额与不可信内容后的写入策略；`BudgetMiddleware` 控制累计 token/估算成本/步数。用 `stack.add(...)` 添加中间件，先明确安全策略再启用副作用。工具权限、人工审批、内容 guardrail 与 Docker/E2B 隔离分别配置。
 
-创建 `plugins/my-plugin/plugin.yaml`：
+## 计划与多 Agent
 
-```yaml
-name: my-plugin
-version: 1.0.0
-description: 我的插件
-hooks:
-  pre_tool_call: on_tool_call
-  post_llm_call: on_llm_response
-tools:
-  - name: my_tool
-    description: 我的工具
-    handler: my_tool_handler
-```
+`Planner` 生成 `Task` DAG，`PlanExecutor.execute(plan)` 验证依赖并调度。`PlanExecutor.resume(plan, task_id, approved=True)` 续跑审批任务及新就绪后继。保留返回的任务状态、interrupt、session_id 和 usage；挂起不是失败重试。
 
-### 使用
+同步 SubAgent 与后台 AsyncSubAgent 使用共享 Runner 与继承治理。后台工具包括 start/check/cancel/resume；`resume_async_task` 可续跑挂起的子任务。句柄与调度任务保存在当前进程，不能宣称重启后仍有同一个后台句柄；子运行检查点可通过持久后端保存。
 
-```python
-from wuwei.plugin import PluginLoader, PluginRegistry
+`MultiAgentGraph` 成员挂起或未完成时抛出 `DelegationStoppedError`，异常 `.result` 保留成员 status、usage 与 interrupt。应用取得成员恢复结果后再决定继续协作，不能把挂起成员当成功文本交给后继。
 
-# 加载插件
-loader = PluginLoader("plugins/")
-plugins = loader.load_all()
+## 图和分叉调试
 
-# 注册插件
-registry = PluginRegistry()
-for plugin in plugins:
-    registry.register(plugin)
+`StateGraph` 节点返回 State 或字段更新 dict；`writes={"field": reducer}` 指定归并。未知字段写入 state.metadata，invoke/stream 使用相同 reducer。完整示例见 [离线示例](docs/examples/offline.md)。
 
-# 获取插件钩子和工具
-hooks = registry.get_hook("pre_tool_call")
-tools = registry.list_tools()
-```
+`await agent.fork(checkpoint_id)` 创建隔离会话与新 run，不修改原分支，默认模拟副作用。明确确认需要真实动作后才传 `allow_side_effects=True`。它是反事实调试，不是跨系统 exactly-once 重放。
 
-## 上下文压缩
+## 上下文、存储和检索
 
-### 基本用法
+- `Context` 保存会话消息；窗口与压缩中间件减少模型上下文，不是原文存储。
+- `StorageMiddleware` / `FileStorage` 以 session 归档；业务应定义保存期限和访问策略。
+- `ContextLedger(persist_dir=...)` + `LedgerMiddleware` 外置大块结果；注册 `ledger_tools(ledger)` 供 read_context/pin_context/list_context 召回。持久原文与缓存分离；不持久模式为保留引用仍保留原文，总内存不保证有界。
+- `MemoryMiddleware` / `CuratedMemoryStore` 用于记忆策展；`RagMiddleware` / KnowledgeStore 用于检索。vectorstore 提供内存及 Chroma、Qdrant、pgvector、Milvus 可选后端。
 
-```python
-from wuwei.middleware import ContextCompressionMiddleware
+## 插件、技能和代码执行
 
-middleware = ContextCompressionMiddleware(
-    llm=llm,
-    trigger_tokens=4000,  # 4000 token 时触发
-    keep_recent=10,       # 保留最近 10 轮
-)
+Plugin 的 setup(ctx) 通过 ctx.tool_registry 与 ctx.middleware_stack 注册能力，由 PluginManager 管理生命周期。Agent 支持 plugins、plugin_dir。FileSystemSkillProvider 读取 SKILL.md，SkillManager 提供按需指令加载和 allowed-tools 约束。
 
-agent = Agent(llm=llm, tools=tools, middleware=MiddlewareStack([middleware]))
-```
+Code Mode 用 `enable_code_mode(agent)` 注册 run_code；嵌套工具经当前运行治理。直接 `run_code(code, executor, governed_execute=callback)` 必须显式提供可信治理入口。它运行进程内 Python，拥有宿主权限，不是沙箱，不能安全执行任意不可信代码或强制终止死循环。隔离需求使用独立 Docker/E2B 执行路径，并配置资源/网络限制。
 
-### 自动压缩流程
+## MCP 与 HTTP 协议
 
-1. 检测 token 数量
-2. 截断大参数（优化）
-3. 生成对话摘要
-4. 保留最近消息
-5. 卸载旧消息到文件
+MCP client 支持 stdio、Streamable HTTP 和独立旧 HTTP+SSE，transport 分别为 stdio/http/sse。`MCPSessionManager.connect_all()` 隔离服务器失败；使用完 `disconnect_all()`。动态发现只缓存发现结果，每次模型调用注入概览，tool_search 按需注册工具。远端 readOnlyHint 不是本地授权依据。
 
-## MCP 支持
-
-### 配置
-
-创建 `.mcp.json` 文件：
+`build_a2a_app(agent, name=..., description=..., url=...)` 返回 ASGI 应用。声明 **A2A 0.3.0 JSON-RPC**，向卡片 URL 发标准 `message/send`。`tasks/send` 仅为弃用兼容入口，不声明 1.0：
 
 ```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-      "transport": "stdio"
-    },
-    "remote-server": {
-      "url": "https://mcp.example.com/mcp",
-      "transport": "http"
-    }
-  }
-}
+{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","messageId":"m1","role":"user","parts":[{"kind":"text","text":"你好"}]}}}
 ```
 
-### 使用
+interrupted 映射 input-required，恢复数据在任务 metadata.interrupt 中。没有实现的协议方法返回错误，不假装支持完整 A2A 方法集。
 
-```python
-from wuwei.mcp import MCPConfig, MCPSessionManager
+`build_ag_ui_app(agent)` 的 POST /run 接收 threadId/messages，输出 SSE 或 NDJSON；`build_mcp_server`/`serve_mcp` 提供 MCP Server 出口。应用服务器部署、认证、TLS、限流由宿主负责。
 
-# 加载配置
-config = MCPConfig.load()
+## 事件、评估与集成
 
-# 连接服务器
-session = MCPSessionManager(config)
-await session.connect_all()
-
-# 获取工具
-tools = session.get_all_tools()
-
-# 使用工具
-agent = Agent(llm=llm, tools=tools)
-```
-
-## 技能系统
-
-### 定义技能
-
-创建 `skills/my-skill/SKILL.md`：
-
-```markdown
----
-name: code-review
-description: "代码审查技能"
-version: 1.0.0
-when_to_use: "当用户要求审查代码时"
-allowed_tools:
-  - read_file
-  - grep
-tags: [code-quality, review]
----
-
-# 代码审查
-
-## 检查清单
-
-1. 代码风格
-2. 错误处理
-3. 安全性
-```
-
-### 使用
-
-```python
-from wuwei import SkillManager, FileSystemSkillProvider
-from wuwei.skill import SkillViewerTool
-
-provider = FileSystemSkillProvider("skills/")
-manager = SkillManager([provider])
-
-# 创建 SkillViewer 工具
-viewer = SkillViewerTool(manager)
-agent = Agent(llm=llm, tools=[viewer, ...])
-```
-
-## 多平台网关
-
-### Webhook 网关
-
-```python
-from wuwei.gateway import WebhookGateway
-
-async def agent_factory():
-    return Agent(llm=llm, tools=tools)
-
-gateway = WebhookGateway(
-    agent_factory=agent_factory,
-    host="0.0.0.0",
-    port=8080,
-)
-
-await gateway.start()
-```
-
-### 微信网关
-
-```python
-from wuwei.gateway.adapters import WeChatGateway
-
-gateway = WeChatGateway(
-    agent_factory=agent_factory,
-    webhook_url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx",
-)
-
-await gateway.start()
-```
-
-## 示例代码
-
-查看 `examples/` 目录获取更多示例：
-
-- `examples/minimal.py` - 最小示例
-- `examples/graph.py` - 状态图示例
-- `examples/middleware.py` - 中间件示例
-- `examples/mcp.py` - MCP 示例
-- `examples/skill.py` - 技能系统示例
-- `examples/gateway.py` - 网关示例
-
-## API 参考
-
-详细的 API 参考请查看源代码中的 docstring，或访问：
-- `wuwei.core` - 核心模块
-- `wuwei.llm` - LLM 网关
-- `wuwei.tools` - 工具系统
-- `wuwei.graph` - 状态图
-- `wuwei.middleware` - 中间件
-- `wuwei.mcp` - MCP 支持
-- `wuwei.skill` - 技能系统
-- `wuwei.gateway` - 网关
+EventBus 订阅运行事件，ActionLog 记录动作；OpenTelemetry 需 observability extra。`wuwei-evals` 运行数据集与轨迹/输出/rubric 断言；LLM judge 需要模型调用预算。`wuwei-debug` 浏览检查点。多平台 gateway 包含飞书、钉钉、Telegram、微信与 Webhook 适配器；DecisionClient 提供决策服务入口。每种远程服务都应做部署环境独立验收。

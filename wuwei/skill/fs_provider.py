@@ -69,7 +69,20 @@ class FileSystemSkillProvider(SkillProvider):
             self._collect_relative_files(path.parent / "references") if path is not None else []
         )
 
-        # 解析增强的元数据字段
+        # agentskills.io 开放标准兼容：
+        # - allowed-tools（连字符，逗号分隔字符串或列表）与 allowed_tools 等价
+        # - license / metadata 字段直接透传
+        allowed_tools = frontmatter.get("allowed_tools")
+        if allowed_tools is None:
+            raw_allowed = frontmatter.get("allowed-tools")
+            if isinstance(raw_allowed, str):
+                allowed_tools = [t.strip() for t in raw_allowed.split(",") if t.strip()]
+            else:
+                allowed_tools = raw_allowed or []
+
+        # 递归解析 metadata 子表（开放标准的自由扩展位）
+        extra_metadata = frontmatter.get("metadata") or {}
+
         return Skill(
             name=name,
             description=description,
@@ -77,15 +90,15 @@ class FileSystemSkillProvider(SkillProvider):
             path=skill_path,
             scripts=scripts,
             references=references,
-            # 新增的增强字段
-            version=frontmatter.get("version", "1.0.0"),
+            version=str(frontmatter.get("version", "1.0.0")),
             author=frontmatter.get("author", ""),
             license=frontmatter.get("license", "MIT"),
             when_to_use=frontmatter.get("when_to_use", ""),
-            allowed_tools=frontmatter.get("allowed_tools", []),
+            allowed_tools=list(allowed_tools),
             required_tools=frontmatter.get("required_tools", []),
             model=frontmatter.get("model"),
             tags=frontmatter.get("tags", []),
+            metadata=extra_metadata if isinstance(extra_metadata, dict) else {},
         )
 
     def _collect_relative_files(self, root: Path) -> list[str]:

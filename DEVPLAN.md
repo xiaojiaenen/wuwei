@@ -1,3 +1,5 @@
+> 历史设计记录：本文保留当时的设计与诊断，不代表当前实现。当前用法见 [README](README.md)，修复验收见 [状态清单](docs/audits/2026-10-27/FIX_STATUS.md)。
+
 # Wuwei 2.0 开发计划
 
 > 基于 [REDESIGN.md](REDESIGN.md) 的改造方案，制定详细的开发计划。

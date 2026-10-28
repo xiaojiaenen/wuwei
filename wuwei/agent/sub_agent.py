@@ -17,18 +17,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any
 
-from wuwei.core.message import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from wuwei.llm.types import Message
-from wuwei.graph.graph import END, CompiledGraph, StateGraph
-from wuwei.graph.state import State
+from wuwei.core.message import ToolMessage
 from wuwei.middleware.base import Middleware, MiddlewareContext
-from wuwei.tools import Tool, ToolRegistry
+from wuwei.tools import Tool
 
 
 @dataclass
@@ -63,8 +59,7 @@ class SubAgent:
             "function": {
                 "name": f"task_{self.name}",
                 "description": (
-                    f"Delegate a task to the '{self.name}' sub-agent. "
-                    f"{self.description}"
+                    f"Delegate a task to the '{self.name}' sub-agent. {self.description}"
                 ),
                 "parameters": {
                     "type": "object",
@@ -90,6 +85,8 @@ class SubAgentMiddleware(Middleware):
         sub = SubAgent(name="coder", description="Write and edit code", ...)
         middleware = SubAgentMiddleware(sub_agents=[sub], parent_llm=llm)
     """
+
+    is_tool_handler = True
 
     def __init__(
         self,
@@ -135,37 +132,55 @@ class SubAgentMiddleware(Middleware):
         ctx: MiddlewareContext,
         tool_call: Any,
     ) -> Any:
-        """拦截 task_* 工具调用
+        """拦截 task_* 工具调用并执行子代理
 
-        如果 LLM 调用了 task_{sub_agent_name}，
-        拦截执行，由子代理处理并返回结果。
+        返回 ToolMessage 表示"中间件已处理"——AgentRunner 会把它直接
+        作为工具结果写回会话历史（对流式/非流式路径行为一致）。
         """
-        tool_name = tool_call.function.name if hasattr(tool_call, 'function') else getattr(tool_call, 'name', '')
+        tool_name = (
+            tool_call.function.name
+            if hasattr(tool_call, "function")
+            else getattr(tool_call, "name", "")
+        )
         if not tool_name.startswith("task_"):
             return tool_call  # 不是子代理工具，放行
 
         # 获取原始 tool_call_id
-        tc_id = tool_call.id if hasattr(tool_call, 'id') else getattr(tool_call, 'tool_call_id', '')
-        
-        # 执行子代理，结果直接写入 state.messages
-        result_msg = await self.handle_task_tool(
-            tool_name=tool_name,
-            arguments=tool_call.function.arguments if hasattr(tool_call, 'function') else {},
+        tc_id = tool_call.id if hasattr(tool_call, "id") else getattr(tool_call, "tool_call_id", "")
+
+        from wuwei.runtime.interrupt import InterruptSignal
+
+        delegations = ctx.metadata.setdefault("delegations", {})
+        previous = delegations.get(tc_id)
+        args = tool_call.function.arguments if hasattr(tool_call, "function") else {}
+        sub_agent = self.sub_agents.get(tool_name[5:])
+        if sub_agent is None:
+            return tool_call
+        resume = previous.get("child_interrupt") if previous else None
+        result = await self._run_sub_agent(
+            sub_agent,
+            args.get("task", ""),
+            sub_agent.model or self.parent_llm,
             ctx=ctx,
+            resume=resume,
         )
+        payload = json.loads(result)
+        if payload["status"] == "interrupted":
+            continuation = {
+                "kind": "sub_agent",
+                "call_id": tc_id,
+                "child_interrupt": payload["interrupt"],
+                "child_session_id": payload["session_id"],
+            }
+            delegations[tc_id] = continuation
+            signal = InterruptSignal(tool_call, reason="Sub-agent awaiting approval")
+            signal.continuation = continuation
+            raise signal
+        delegations.pop(tc_id, None)
+        result_msg = ToolMessage(content=result, tool_call_id=tc_id, name=tool_name)
         # 确保 tool_call_id 匹配 LLM 的 tool call
-        if hasattr(result_msg, 'tool_call_id'):
-            result_msg.tool_call_id = tc_id
-        elif isinstance(result_msg, dict):
-            result_msg['tool_call_id'] = tc_id
-        
-        # 将子代理结果写入状态，供 LLM 在下一轮看到
-        if hasattr(ctx.state, 'add_message'):
-            ctx.state.add_message(result_msg)
-        elif hasattr(ctx.state, 'messages'):
-            ctx.state.messages.append(result_msg)
-        # 返回 None 表示拦截，AgentRunner 会跳过该工具的执行
-        return None
+        result_msg.tool_call_id = tc_id
+        return result_msg
 
     def get_task_tools(self) -> list[dict]:
         """获取所有子代理的工具 schema"""
@@ -206,7 +221,7 @@ class SubAgentMiddleware(Middleware):
         llm = sub_agent.model or self.parent_llm
 
         # 构建子代理图
-        result = await self._run_sub_agent(sub_agent, task_description, llm)
+        result = await self._run_sub_agent(sub_agent, task_description, llm, ctx=ctx)
 
         return ToolMessage(
             content=result,
@@ -219,130 +234,83 @@ class SubAgentMiddleware(Middleware):
         sub_agent: SubAgent,
         task: str,
         llm: Any,
+        ctx: MiddlewareContext | None = None,
+        resume: dict | None = None,
     ) -> str:
-        """执行子代理
+        """Use the same governed engine as ordinary agent runs."""
+        from wuwei.agent.agent import Agent
+        from wuwei.runtime.context import current_context
 
-        构建标准 Agent 循环图并执行。
-        """
-        from wuwei.middleware.stack import MiddlewareStack
-        from wuwei.tools import ToolExecutor
-
-        # 构建工具注册表
-        registry = ToolRegistry()
-        if sub_agent.tools:
-            for tool in sub_agent.tools:
-                registry.register(tool)
-        executor = ToolExecutor(registry)
-
-        # 构建中间件栈
-        mw_stack = MiddlewareStack()
-        if sub_agent.middleware:
-            for mw in sub_agent.middleware:
-                mw_stack.add(mw)
-
-        all_tools = list(registry.list_tools())
-
-        # 构建初始状态
-        start_time = time.monotonic()
-        state = State(
-            messages=[
-                SystemMessage(content=sub_agent.system_prompt),
-                HumanMessage(content=task),
-            ],
-            metadata={},
-            step=0,
+        parent = ctx or current_context.get()
+        config = parent.config if parent is not None else {}
+        worker = Agent(
+            llm=llm,
+            tools=sub_agent.tools or [],
+            load_builtins=False,
+            default_system_prompt=sub_agent.system_prompt,
+            default_max_steps=sub_agent.max_steps,
+            middleware=inherit_middleware(
+                config.get("middleware"), sub_agent.middleware, exclude=self
+            ),
+            checkpointer=config.get("checkpointer"),
+            event_bus=config.get("event_bus"),
+        )
+        session = None if resume else worker.create_session()
+        session_id = resume["session_id"] if resume else session.session_id
+        started = time.monotonic()
+        try:
+            if resume:
+                decision = parent.metadata.get("continuation_decision", {}) if parent else {}
+                result = await worker.resume(
+                    resume,
+                    approved=decision.get("approved", True),
+                    reason=decision.get("reason", ""),
+                )
+            else:
+                result = await worker.run(task, session=session)
+        except BaseException as exc:
+            stopped = worker._sessions.get(session_id, session)
+            exc.child_usage = dict(stopped.last_usage) if stopped else {}
+            exc.child_llm_calls = stopped.last_llm_calls if stopped else 0
+            exc.child_unknown = (
+                {"session_id": session_id, "run_id": stopped.metadata["_blocked_run"]}
+                if stopped and stopped.metadata.get("_blocked_run")
+                else None
+            )
+            raise
+        stopped = worker._sessions.get(session_id)
+        return json.dumps(
+            {
+                "sub_agent": sub_agent.name,
+                "result": result.content,
+                "status": result.status,
+                "usage": result.usage,
+                "llm_calls": result.llm_calls,
+                "interrupt": getattr(result, "interrupt", None),
+                "session_id": session_id,
+                "reconciliation": (
+                    {"session_id": session_id, "run_id": stopped.metadata["_blocked_run"]}
+                    if stopped and stopped.metadata.get("_blocked_run")
+                    else None
+                ),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "steps": getattr(result, "steps", 0),
+            },
+            ensure_ascii=False,
         )
 
-        # 构建子代理图
-        graph = StateGraph(State)
-        graph.set_max_steps(sub_agent.max_steps)
 
-        async def agent_node(s: State, config: dict | None = None) -> State:
-            messages = [m for m in s.messages]
-            tools = list(all_tools)
+def inherit_middleware(parent=None, explicit=None, *, exclude=None):
+    """Preserve parent guards and add child constraints without rebinding them.
 
-            ctx = MiddlewareContext(state=s, config=config or {}, step=s.step)
-            ctx = await mw_stack.execute_before_llm(ctx)
-            if hasattr(ctx.state, 'messages'):
-                messages = ctx.state.messages
+    A fresh stack owns hook ordering; middleware instances retain their configured
+    policies. The active dispatcher is omitted to prevent unbounded self-delegation.
+    """
+    from wuwei.middleware.stack import MiddlewareStack
 
-            response = await llm.generate(messages, tools=tools)
-
-            ai_msg = AIMessage(
-                content=response.message.content or "",
-                tool_calls=response.message.tool_calls or [],
-            )
-
-            ctx = await mw_stack.execute_after_llm(ctx, ai_msg)
-            s.add_message(ai_msg)
-            s.metadata["_has_tool_calls"] = bool(response.message.tool_calls)
-            s.metadata["_tool_calls"] = response.message.tool_calls or []
-            s.metadata["_last_content"] = response.message.content or ""
-            return s
-
-        async def tool_node(s: State, config: dict | None = None) -> State:
-            tool_calls = s.metadata.get("_tool_calls", [])
-            ctx = MiddlewareContext(state=s, config=config or {}, step=s.step)
-
-            for tc in tool_calls:
-                modified = await mw_stack.execute_before_tool(ctx, tc)
-                if modified is None:
-                    continue
-
-                try:
-                    msg = await executor.execute_one(modified)
-                except Exception as exc:
-                    msg = Message(
-                        role="tool",
-                        content=f"Tool error: {exc}",
-                        tool_call_id=modified.id,
-                        name=modified.function.name,
-                    )
-
-                tool_msg = ToolMessage(
-                    content=msg.content or "",
-                    tool_call_id=msg.tool_call_id or modified.id,
-                    name=msg.name or modified.function.name,
-                )
-                modified_msg = await mw_stack.execute_after_tool(ctx, tool_msg)
-                s.add_message(
-                    ToolMessage(
-                        role="tool",
-                        content=modified_msg.content or "",
-                        tool_call_id=modified_msg.tool_call_id,
-                        name=modified_msg.name,
-                    )
-                )
-            return s
-
-        async def should_continue(s: State, config: dict | None = None) -> str:
-            if s.metadata.get("_has_tool_calls"):
-                return "continue"
-            return "end"
-
-        graph.add_node("agent", agent_node)
-        graph.add_node("tools", tool_node)
-        graph.set_entry_point("agent")
-        graph.add_conditional_edges("agent", should_continue, {"continue": "tools", "end": END})
-        graph.add_edge("tools", "agent")
-
-        compiled = graph.compile()
-        final_state = await compiled.invoke(state)
-
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
-
-        # 提取结果
-        last_ai = final_state.get_last_ai_message()
-        result_content = ""
-        if last_ai and last_ai.content:
-            result_content = last_ai.content
-
-        # 构建完整的 ToolMessage 结果
-        result = json.dumps({
-            "sub_agent": sub_agent.name,
-            "result": result_content,
-            "elapsed_ms": elapsed_ms,
-            "steps": final_state.step,
-        }, ensure_ascii=False)
-
-        return result
+    stack = MiddlewareStack()
+    for source in (parent, explicit):
+        for middleware in getattr(source, "middlewares", source or []):
+            if middleware is not exclude and middleware not in stack.middlewares:
+                stack.add(middleware)
+    return stack

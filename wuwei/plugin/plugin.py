@@ -11,15 +11,15 @@ Plugin 是 wuwei 唯一的扩展机制。每个插件通过 PluginContext 注册
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from wuwei.tools.registry import ToolRegistry
-    from wuwei.tools.tool import Tool
-    from wuwei.skill import SkillManager
     from wuwei.mcp.session import MCPSessionManager
     from wuwei.middleware.stack import MiddlewareStack
+    from wuwei.skill import SkillManager
+    from wuwei.tools.registry import ToolRegistry
 
 
 class PluginContext:

@@ -1,0 +1,23 @@
+{"probe": "versions", "openai": "3.23.0", "anthropic": "1.11.0", "mcp": "2.2.0", "pydantic": "2.13.5"}
+{"probe": "duplicate_response_types", "same": false, "legacy_fields": ["content", "tool_calls", "reasoning_content", "usage", "model", "finish_reason", "metadata"], "public_fields": ["message", "finish_reason", "usage", "model", "latency_ms"]}
+{"probe": "openai_config_ignored", "temperature": null, "max_tokens": null}
+{"probe": "client_request_parameter_mix", "error": "got an unexpected keyword argument 'max_retries'", "sdk_retries": 2}
+{"probe": "usage_none", "content": "ok", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+{"probe": "usage_only_frame", "parsed": {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}}
+{"probe": "unknown_finish_reason", "error": "ValidationError"}
+{"probe": "invalid_tool_json", "actual_arguments": {}}
+{"probe": "tool_delta_ends_stop", "complete": [null, null]}
+{"probe": "deterministic_retry", "primary_calls": 3, "fallback_calls": 1, "error": "TypeError"}
+{"probe": "stream_retry_fallback", "primary_calls": 1, "fallback_calls": 0, "error": "ConnectionError"}
+{"probe": "stream_timeout", "configured": 0.01, "external_cancel_after": 0.05, "observed": "outer timeout needed"}
+{"probe": "anthropic_truncation", "raw": "max_tokens", "parsed": "stop", "stream": {"content": "", "finish_reason": "length", "usage": {"prompt_tokens": 0, "completion_tokens": 5, "total_tokens": 5}}}
+{"probe": "anthropic_base_url", "error": "AnthropicAdapter.__init__() got an unexpected keyword argument 'base_url'"}
+{"probe": "lifecycle", "gateway_has_close": false, "gateway_has_context_manager": false}
+{"probe": "base_message_serialization", "output": {"role": "assistant", "content": ""}}
+{"probe": "reasoning_sent_unconditionally", "messages": [{"role": "assistant", "content": "ok", "reasoning_content": "provider-specific"}]}
+{"probe": "status_error_classification", "classification": "fatal"}
+{"probe": "generic_tool_schema", "schema": {"type": "object", "properties": {"items": {"type": "string", "description": "\u53c2\u6570 items"}}, "required": ["items"]}}
+{"probe": "a2a_method", "method": "message/send", "status": 404, "payload": {"error": {"code": -32601, "message": "method not supported: message/send"}}}
+{"probe": "a2a_method", "method": "SendMessage", "status": 404, "payload": {"error": {"code": -32601, "message": "method not supported: SendMessage"}}}
+{"probe": "a2a_method", "method": "tasks/send", "status": 200, "payload": {"jsonrpc": "2.0", "id": "rpc-1", "result": {"id": "2e134741-cb5a-41ad-b54d-0c9dcd228206", "contextId": "2e134741-cb5a-41ad-b54d-0c9dcd228206", "sessionId": "2e134741-cb5a-41ad-b54d-0c9dcd228206", "kind": "task", "status": {"state": "completed", "timestamp": "2026-10-27T14:37:19.063Z"}, "artifacts": [{"artifactId": "2c49f8a6-c10f-4cae-82e2-37273f2f95a3", "name": "response", "parts": [{"kind": "text", "type": "text", "text": "ok"}]}], "history": [{"role": "agent", "parts": [{"kind": "text", "type": "text", "text": "ok"}]}]}}}
+{"probe": "a2a_interface", "interfaces": [{"protocolVersion": "1.0", "url": "http://localhost:8000", "transport": "JSONRPC"}]}

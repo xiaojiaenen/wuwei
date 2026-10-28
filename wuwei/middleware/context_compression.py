@@ -12,11 +12,8 @@
 7. 工具结果去重：相同输出的工具调用合并
 """
 
-import hashlib
 import time
-from typing import Optional
 
-from wuwei.core.message import AIMessage, ToolMessage
 from wuwei.llm.types import Message
 from wuwei.middleware.base import Middleware, MiddlewareContext
 
@@ -80,37 +77,48 @@ class ContextCompressionMiddleware(Middleware):
         self.min_savings_ratio = min_savings_ratio
         self.failure_cooldown_s = failure_cooldown_s
 
-        # 状态追踪
-        self._last_summary: str | None = None
-        self._last_summary_saved_tokens: int = 0
-        self._last_summary_time: float = 0
-        self._last_failure_time: float = 0
-        self._summary_cache: dict[str, str] = {}
+    def _state(self, ctx):
+        # Summaries live with a single session and survive ordinary run boundaries.
+        session = ctx.config.get("session")
+        owner = (
+            session.metadata.setdefault("middleware_state", {})
+            if session is not None
+            else ctx.metadata
+        )
+        key = (
+            f"context_compression:{self.trigger_tokens}:{self.keep_recent_turns}:{self.max_tokens}"
+        )
+        return owner.setdefault(key, {})
 
     def _estimate_tokens(self, messages: list) -> int:
         """估算消息列表的 token 数
 
         优先使用 tiktoken，降级为 Unicode 字符估算。
         """
-        total_chars = 0
+        cjk_count = 0
+        non_cjk_count = 0
         for msg in messages:
-            content = getattr(msg, 'content', '') or ''
-            total_chars += len(content)
+            content = getattr(msg, "content", "") or ""
+            for ch in content:
+                if "\u4e00" <= ch <= "\u9fff":
+                    cjk_count += 1
+                else:
+                    non_cjk_count += 1
             # tool_calls 也计入
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
-                    total_chars += len(str(tc))
+                    text = str(tc)
+                    non_cjk_count += len(text)
 
-        # Unicode 感知：中文字符 ≈ 1.5 tokens，英文 ≈ 0.25 tokens/char
-        cjk_count = sum(1 for c in str(total_chars) if '\u4e00' <= c <= '\u9fff')
-        non_cjk = total_chars - cjk_count
-        return int(cjk_count * 1.5 + non_cjk * 0.3)
+        # 中文 ≈ 1.5 tokens/字，英文 ≈ 0.3 tokens/char
+        return int(cjk_count * 1.5 + non_cjk_count * 0.3)
 
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """LLM 调用前检查并压缩上下文"""
-        if not hasattr(ctx.state, 'messages') or not ctx.state.messages:
+        if not hasattr(ctx.state, "messages") or not ctx.state.messages:
             return ctx
 
+        state = self._state(ctx)
         messages = ctx.state.messages
         estimated_tokens = self._estimate_tokens(messages)
 
@@ -120,20 +128,20 @@ class ContextCompressionMiddleware(Middleware):
             return ctx
 
         # 反抖动检查：上次压缩节省的 token < 10%
-        if self._last_summary_time > 0:
+        if state.get("last_summary_time", 0) > 0:
             savings = estimated_tokens - trigger
-            if self._last_summary_saved_tokens > 0:
-                savings_ratio = savings / self._last_summary_saved_tokens
+            if state.get("last_summary_saved_tokens", 0) > 0:
+                savings_ratio = savings / state["last_summary_saved_tokens"]
                 if savings_ratio < self.min_savings_ratio:
                     return ctx
 
         # 执行压缩
-        compressed = await self._compress_context(messages)
+        compressed = await self._compress_context(messages, ctx=ctx)
         ctx.state.messages = compressed
 
         new_estimate = self._estimate_tokens(compressed)
-        self._last_summary_saved_tokens = estimated_tokens - new_estimate
-        self._last_summary_time = time.time()
+        state["last_summary_saved_tokens"] = estimated_tokens - new_estimate
+        state["last_summary_time"] = time.time()
 
         return ctx
 
@@ -143,16 +151,20 @@ class ContextCompressionMiddleware(Middleware):
         current_turn = []
         for msg in messages:
             current_turn.append(msg)
-            if msg.role in ("assistant", "tool") and hasattr(msg, 'tool_calls') and not msg.tool_calls:
-                # assistant 消息无 tool_calls → 轮次结束
-                if current_turn:
-                    turns.append(current_turn)
-                    current_turn = []
+            if (
+                msg.role in ("assistant", "tool")
+                and hasattr(msg, "tool_calls")
+                and not msg.tool_calls
+                and current_turn
+            ):
+                turns.append(current_turn)
+                current_turn = []
         if current_turn:
             turns.append(current_turn)
         return turns
 
-    async def _compress_context(self, messages: list) -> list:
+    async def _compress_context(self, messages: list, *, ctx=None) -> list:
+        state = self._state(ctx) if ctx is not None else {}
         """压缩上下文"""
         if len(messages) <= 2:
             return messages
@@ -183,11 +195,14 @@ class ContextCompressionMiddleware(Middleware):
                 found = False
                 for j in range(cut - 1, protect_head - 1, -1):
                     prev = non_system[j]
-                    if prev.role == "assistant" and prev.tool_calls:
-                        if any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id")):
-                            cut = j
-                            found = True
-                            break
+                    if (
+                        prev.role == "assistant"
+                        and prev.tool_calls
+                        and any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id"))
+                    ):
+                        cut = j
+                        found = True
+                        break
                 if not found:
                     break
             else:
@@ -203,13 +218,14 @@ class ContextCompressionMiddleware(Middleware):
         old_messages = self._deduplicate_tool_results(old_messages)
 
         # 如果有缓存的摘要，迭代更新
-        existing_summary = self._last_summary
-        summary = await self._generate_structured_summary(old_messages, existing_summary)
+        existing_summary = state.get("last_summary")
+        summary = await self._generate_structured_summary(old_messages, existing_summary, ctx=ctx)
 
         if summary:
-            self._last_summary = summary
+            state["last_summary"] = summary
+            # 摘要以 system 角色注入（v3.1 修复：旧实现用 user 角色会污染对话语义）
             summary_msg = Message(
-                role="user",
+                role="system",
                 content=summary,
             )
             # 确保 recent_messages 中的 tool_call 配对完整
@@ -223,14 +239,21 @@ class ContextCompressionMiddleware(Middleware):
                 if tc_id:
                     for j in range(len(old_messages) - 1, -1, -1):
                         prev = old_messages[j]
-                        if prev.role == "assistant" and prev.tool_calls:
-                            if any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id")):
-                                recovered.insert(0, old_messages.pop(j))
-                                break
+                        if (
+                            prev.role == "assistant"
+                            and prev.tool_calls
+                            and any(tc.id == tc_id for tc in prev.tool_calls if hasattr(tc, "id"))
+                        ):
+                            recovered.insert(0, old_messages.pop(j))
+                            break
                 recent_messages = recent_messages[1:]
 
             # 处理开头的 assistant(tool_calls)，确保对应的 tool response 也在
-            if recent_messages and recent_messages[0].role == "assistant" and recent_messages[0].tool_calls:
+            if (
+                recent_messages
+                and recent_messages[0].role == "assistant"
+                and recent_messages[0].tool_calls
+            ):
                 assistant_msg = recent_messages[0]
                 tc_ids = {tc.id for tc in assistant_msg.tool_calls if hasattr(tc, "id")}
                 # 收集后续的 tool response
@@ -254,7 +277,13 @@ class ContextCompressionMiddleware(Middleware):
                 # 重建 recent_messages：assistant + tool_msgs + rest
                 recent_messages = [assistant_msg] + tool_msgs + rest
 
-            result = system_messages + [summary_msg] + recovered + recent_messages
+            result = (
+                system_messages
+                + non_system[:protect_head]
+                + [summary_msg]
+                + recovered
+                + recent_messages
+            )
             return result
 
         return messages
@@ -268,17 +297,19 @@ class ContextCompressionMiddleware(Middleware):
         result = []
         for msg in messages:
             if msg.role == "tool":
-                content = getattr(msg, 'content', '') or ''
-                content_hash = hashlib.md5(content.encode()).hexdigest()
+                content = getattr(msg, "content", "") or ""
+                content_hash = content
                 if content_hash in seen_hashes:
                     seen_hashes[content_hash] += 1
                     # 替换重复结果为简短引用
-                    result.append(type(msg)(
-                        role="tool",
-                        content=f"[同上，结果与消息 #{seen_hashes[content_hash]} 相同]",
-                        tool_call_id=getattr(msg, 'tool_call_id', ''),
-                        name=getattr(msg, 'name', ''),
-                    ))
+                    result.append(
+                        type(msg)(
+                            role="tool",
+                            content=f"[同上，结果与消息 #{seen_hashes[content_hash]} 相同]",
+                            tool_call_id=getattr(msg, "tool_call_id", ""),
+                            name=getattr(msg, "name", ""),
+                        )
+                    )
                     continue
                 seen_hashes[content_hash] = 1
             result.append(msg)
@@ -288,23 +319,28 @@ class ContextCompressionMiddleware(Middleware):
         self,
         messages: list,
         existing_summary: str | None = None,
+        *,
+        ctx=None,
     ) -> str | None:
         """生成结构化摘要
 
         使用 LLM 生成包含已解决/待解决问题、活跃任务的结构化摘要。
         """
+        state = self._state(ctx) if ctx is not None else {}
         # 冷却检查
-        if self._last_failure_time > 0:
-            if time.time() - self._last_failure_time < self.failure_cooldown_s:
-                return None
+        if (
+            state.get("last_failure_time", 0) > 0
+            and time.time() - state["last_failure_time"] < self.failure_cooldown_s
+        ):
+            return None
 
         # 构建压缩文本
         conversation_parts = []
         for msg in messages:
-            content = getattr(msg, 'content', '') or ''
+            content = getattr(msg, "content", "") or ""
             if not content:
                 continue
-            role = getattr(msg, 'role', 'user')
+            role = getattr(msg, "role", "user")
             # 截断超长工具输出
             if role == "tool" and len(content) > 500:
                 content = content[:500] + "..."
@@ -313,11 +349,6 @@ class ContextCompressionMiddleware(Middleware):
         conversation_text = "\n".join(conversation_parts)
         if not conversation_text.strip():
             return None
-
-        # 缓存检查
-        cache_key = hashlib.md5(conversation_text.encode()).hexdigest()
-        if cache_key in self._summary_cache:
-            return self._summary_cache[cache_key]
 
         # 构建提示
         existing_note = ""
@@ -340,17 +371,19 @@ current task description
 - finding 1"""
 
         try:
-            response = await self.llm.generate(
-                messages=[Message(role="user", content=prompt)],
+            model_call = ctx.config.get("model_call") if ctx is not None else None
+            messages = [Message(role="user", content=prompt)]
+            response = (
+                await model_call(messages, tools=None)
+                if model_call
+                else await self.llm.generate(messages=messages)
             )
-            summary = response.message.content if hasattr(response, 'message') else str(response)
-            if summary:
-                self._summary_cache[cache_key] = summary
-                # LRU 缓存：保留最近 20 条
-                if len(self._summary_cache) > 20:
-                    oldest = next(iter(self._summary_cache))
-                    del self._summary_cache[oldest]
+            summary = response.message.content if hasattr(response, "message") else str(response)
             return summary
-        except Exception:
-            self._last_failure_time = time.time()
+        except Exception as exc:
+            from wuwei.middleware.budget import BudgetExhausted
+
+            if isinstance(exc, BudgetExhausted):
+                raise
+            state["last_failure_time"] = time.time()
             return None

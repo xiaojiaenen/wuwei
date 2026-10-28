@@ -1,15 +1,11 @@
+from .anthropic import AnthropicAdapter
 from .base import BaseAdapter
 from .openai import OpenAIAdapter
-from .anthropic import AnthropicAdapter
-from .zhipu import ZhipuAdapter
-from .dashscope import DashScopeAdapter
-from .ollama import OllamaAdapter
+from .responses import ResponsesAdapter
 
 __all__ = [
-    'BaseAdapter',
-    'OpenAIAdapter',
-    'AnthropicAdapter',
-    'ZhipuAdapter',
-    'DashScopeAdapter',
-    'OllamaAdapter',
+    "BaseAdapter",
+    "OpenAIAdapter",
+    "ResponsesAdapter",
+    "AnthropicAdapter",
 ]

@@ -1,3 +1,19 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_governed_execution = ContextVar("wuwei_governed_execution", default=None)
+
+@contextmanager
+def bind_tool_execution(callback):
+    token = _governed_execution.set(callback)
+    try:
+        yield
+    finally:
+        _governed_execution.reset(token)
+
+def governed_tool_execution():
+    return _governed_execution.get()
+
 import asyncio
 import json
 from typing import Any
@@ -107,7 +123,7 @@ class ToolExecutor:
                 metadata={"attempts": 0},
             )
 
-        max_attempts = tool.execution.retry_policy.normalized_max_attempts()
+        max_attempts = 1 if tool.execution.side_effect else tool.execution.retry_policy.normalized_max_attempts()
         backoff_seconds = max(0.0, tool.execution.retry_policy.backoff_seconds)
         last_exception: Exception | None = None
 
@@ -123,7 +139,7 @@ class ToolExecutor:
                 )
             except Exception as exc:
                 last_exception = exc
-                if attempt >= max_attempts:
+                if attempt >= max_attempts or isinstance(exc, (ValueError, TypeError, TimeoutError)) or type(exc).__module__.startswith(("jsonschema", "pydantic")):
                     break
                 if backoff_seconds:
                     await asyncio.sleep(backoff_seconds)
@@ -134,14 +150,16 @@ class ToolExecutor:
         if isinstance(last_exception, TimeoutError):
             error_type = "ToolTimeout"
             error_message = (
-                f"Tool '{tool.name}' timed out after {tool.execution.timeout_seconds} seconds"
+                f"Tool '{tool.name}' timed out after {tool.execution.timeout_seconds} seconds; execution may continue, reconcile before retry"
             )
         return self.build_error_message(
             tool_call,
             error_type=error_type,
             message=error_message,
             metadata={
-                "attempts": max_attempts,
+                "attempts": attempt,
+                "status": "unknown" if isinstance(last_exception, TimeoutError) and tool.execution.side_effect else "failed",
+                "execution_may_continue": isinstance(last_exception, TimeoutError),
                 "retryable": max_attempts > 1,
             },
         )

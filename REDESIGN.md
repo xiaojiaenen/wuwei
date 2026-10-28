@@ -1,3 +1,5 @@
+> 历史设计记录：本文保留当时的设计与诊断，不代表当前实现。当前用法见 [README](README.md)，修复验收见 [状态清单](docs/audits/2026-10-27/FIX_STATUS.md)。
+
 # Wuwei 2.0 框架重构方案
 
 > 吸取 LangChain、LangGraph、Deep Agents、Hermes Agent、AgentScope、Claude Code、agent-framework、rig 八大框架的优点，摒弃其缺点，对 Wuwei 进行**破坏性重构**。不兼容旧版 API。

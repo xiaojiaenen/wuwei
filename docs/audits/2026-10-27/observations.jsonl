@@ -1,0 +1,23 @@
+{"probe": "middleware_composition", "error": "AttributeError(\"'ToolMessage' object has no attribute 'function'\")"}
+{"probe": "interrupt_batch", "pending": ["a"], "executed": ["a"], "tool_results": ["c1"]}
+{"probe": "repeat_resume", "executed": ["a", "a"]}
+{"probe": "taint_across_steps", "executed": ["http", "write"]}
+{"probe": "permission_paths", "traversal_allowed": true, "sibling_allowed": true}
+{"probe": "session_stream", "sessions": 2, "second_call_humans": ["what was X?"]}
+{"probe": "storage_session", "directories": ["default"]}
+{"probe": "responses_api", "error": "TypeError(\"AsyncResponses.create() got an unexpected keyword argument 'max_tokens'\")", "request_keys": ["model", "input", "stream", "temperature", "max_output_tokens", "max_tokens"]}
+{"probe": "anthropic_usage", "start": {"content": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}, "end": {"content": "", "finish_reason": "stop", "usage": {"prompt_tokens": 0, "completion_tokens": 20, "total_tokens": 20}}}
+{"probe": "agui_session", "sessions": 2, "second_call_humans": ["what was X?"]}
+{"probe": "structured_output", "result_type": "LLMResponse", "history_roles": ["system"]}
+{"probe": "plan_step_limit", "status": "completed", "result": "任务未完成，已达到最大步骤限制。"}
+{"probe": "plan_cycle", "statuses": ["pending", "pending"]}
+{"probe": "ledger_tool_schema", "tools": {"read_context": {"type": "object", "properties": {}, "required": []}, "pin_context": {"type": "object", "properties": {}, "required": []}, "list_context": {"type": "object", "properties": {}, "required": []}}}
+{"probe": "session_serialization", "error": "TypeError('Object of type ActionLog is not JSON serializable')"}
+{"probe": "checkpoint_pagination", "saved": 3, "page": 1, "nextpage": 0}
+{"probe": "graph_invoke", "metadata": {"value": 42}}
+{"probe": "graph_stream_reducer", "error": "AttributeError(\"'dict' object has no attribute 'step'\")"}
+{"probe": "fork", "sessions": 1, "same_original_history": false, "executed": ["deploy", "deploy"]}
+{"probe": "config_fail_open", "middleware_count": 0}
+{"probe": "subagent_policy_and_usage", "executed": ["danger"], "parent_llm_calls": 2, "actual_llm_calls": 4}
+{"probe": "mcp_lazy_discovery", "first_tools": [], "second_tools": ["tool_search"], "overview_first": true, "overview_second": false}
+{"probe": "dynamic_tools", "second_step_tools": ["discover"], "registry": ["discover", "new_tool"]}

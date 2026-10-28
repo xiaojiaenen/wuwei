@@ -1,50 +1,31 @@
-# Changelog
+# 更新日志
 
-## v0.1.8
+## 3.2.0 — 执行契约加固
+
+- 普通/流式/结构化输出与委派共享治理生命周期；会话连续、累计预算与调用统计贯通。
+- 多工具审批持久化完整批次，原子 claim 防止重复恢复；恢复继续执行权限检查；不确定副作用保留 unknown。
+- 工具类型 schema 与执行前校验；同步 handler 不阻塞事件循环；副作用不盲目重试。
+- 模型参数与 SDK client 注入分离、Responses 参数映射、终止原因/usage/reasoning 保留、分类重试和流清理。
+- PlanExecutor.resume、resume_async_task 与非完成委派结果；后台句柄仍为进程内资源。
+- 图流式 reducer 与 invoke 一致；END 公开导出。
+- 账本召回 schema、持久 pin 与缓存淘汰后的原文召回。
+- A2A 明确 0.3 message/send，tasks/send 弃用兼容；MCP 旧 SSE 与 HTTP 分开；AG-UI thread/session 映射和流关闭。
+- fork 使用隔离分支，默认模拟副作用；Code Mode 嵌套工具经治理且明确为可信进程内执行。
+- 公开指南、离线文档示例与迁移说明更新；在线测试显式 opt-in。
+
+## 3.2 能力范围
+
+本版本还提供 DAG 规划、插件与技能、虚拟文件系统、记忆/RAG/可选向量后端、预算/权限中间件、事件/动作日志、评估 CLI、决策客户端、平台 gateway 以及本地/Docker/E2B 执行驱动。远程服务和部署环境需独立验收；检查点不提供跨系统副作用 exactly-once。
+
+## 兼容与展示
+
+工具保留 display_name 中文展示名；类型化注册支持可选参数与列表元素 schema。
+
+## [1.0.0] - 2026-05-08
 
 ### 新增
 
-- **Hook 系统重构**
-  - `RuntimeHook` 基类：`before_llm`、`after_llm`、`after_ai_message`、`before_tool`、`after_tool`、`on_task_start`、`on_task_end` 共 7 个钩子点
-  - `HookManager`：管理多个 Hook 的注册与链式调用
-  - `ConsoleHook`：控制台调试日志 Hook
-  - `ContextCompressionHook`：轮次过多时自动压缩上下文
-  - `StorageHook`：消息增量持久化 Hook
-  - `SkillHook`：技能使用说明自动注入 Hook
-  - `HitlHook`：人机协作审批 Hook
-
-- **流式事件流**
-  - `AgentEvent` 模型：`text_delta`、`reasoning_delta`、`tool_start`、`tool_end`、`done`、`error` 六种事件类型
-  - `Agent.stream_events()` / `PlanAgent.stream_events()` 统一事件流接口
-  - `AgentRunner.stream_events()` / `PlannerExecutorRunner.execute_events()` 底层事件流实现
-
-- **技能系统增强**
-  - `run_skill_python_script` 工具支持 `load_token` 安全校验
-  - `list_skills` 返回技能目录下可用 Python 脚本列表
-
-- **上下文窗口管理**
-  - `SimpleContextWindow`：构建发给模型的精简消息窗口
-  - `ContextWindowConfig`：配置 `max_recent_turns`、`max_tool_chars`、`include_summary`
-  - `split_turns()`：消息列表按轮次拆分
-
-- **LLM 网关**
-  - `LLMGateway.from_env()` 自动搜索 `.env` 文件（最多 3 层父目录）
-  - 流式响应自动拼接 tool call 增量为完整结构
-
-### 变更
-
-- `Agent` 和 `PlanAgent` 构造函数统一接受 `hooks` 参数
-- `BaseSessionAgent` 提取公共逻辑：session 创建/复用、tool_registry 初始化
-- `ToolExecutor.execute()` 支持 `concurrent=True` 并行执行
-- `FileStorage.save_meta()` 使用原子写入（`.tmp` + `os.replace()`）
-
-### 修复
-
-- 修复流式模式下 `tool_calls_complete` 未正确传递的问题
-- 修复 `PlannerExecutorRunner` 中任务统计未正确累加的问题
-- 修复 `ContextCompressionHook` 重复压缩的边界条件
-
----
-
-本文件记录 Wuwei Agent 框架的重要变更。
-格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
+- 首个正式版本发布。
+- 记忆衰减与自动清理机制。
+- 长期记忆与 RAG 知识库功能。
+- Skill 引用资源与缓存机制。

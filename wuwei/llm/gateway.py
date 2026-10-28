@@ -1,14 +1,74 @@
+"""LLM 网关 — 统一的模型接入层
+
+支持的 provider（注册表驱动，新增 provider 只需加一行）：
+- openai:     OpenAI Chat Completions（含任意 OpenAI 兼容端点，传 base_url 即可，
+              如 DeepSeek / vLLM / Ollama / 聚合网关）
+- responses:  OpenAI Responses API
+- anthropic:  Anthropic Claude 系列
+
+能力：分类重试（按状态码）、fallback 链、流式 tool_calls 增量聚合、
+reasoning 透传、.env 自动加载（不依赖 python-dotenv）。
+"""
+
 import asyncio
 import json
 import os
+import random
 import time
+import warnings
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Union
+from typing import Any
 
-from .adapters import OpenAIAdapter, AnthropicAdapter, ZhipuAdapter, DashScopeAdapter, OllamaAdapter
-from .adapters.base import BaseAdapter
-from .types import FunctionCall, LLMResponse, LLMResponseChunk, Message, ToolCall
 from ..tools import Tool
+from .adapters import AnthropicAdapter, OpenAIAdapter, ResponsesAdapter
+from .adapters.base import BaseAdapter
+from .types import (
+    FunctionCall,
+    LLMResponse,
+    LLMResponseChunk,
+    Message,
+    ToolCall,
+    normalize_finish_reason,
+)
+
+# provider 注册表：adapter 类 / 默认模型 / 环境变量前缀 / 是否需要 api_key
+_PROVIDER_SPECS: dict[str, dict[str, Any]] = {
+    "openai": {
+        "adapter": OpenAIAdapter,
+        "default_model": "gpt-4o",
+        "env_prefix": "OPENAI",
+        "requires_api_key": True,
+    },
+    "responses": {
+        "adapter": ResponsesAdapter,
+        "default_model": "gpt-4o",
+        "env_prefix": "OPENAI",
+        "requires_api_key": True,
+    },
+    "anthropic": {
+        "adapter": AnthropicAdapter,
+        "default_model": "claude-sonnet-4-6",
+        "env_prefix": "ANTHROPIC",
+        "requires_api_key": True,
+    },
+}
+
+# Legacy names retain their own environment namespaces during migration.
+for _alias, _prefix in (("zhipu", "ZHIPU"), ("dashscope", "DASHSCOPE"), ("ollama", "OLLAMA")):
+    _PROVIDER_SPECS[_alias] = {
+        **_PROVIDER_SPECS["openai"],
+        "env_prefix": _prefix,
+        "requires_api_key": _alias != "ollama",
+    }
+
+# 按优先级排列的 provider 自动探测规则：环境变量 → provider
+_PROVIDER_DETECTION = [
+    ("ANTHROPIC_API_KEY", "anthropic"),
+    ("OPENAI_API_KEY", "openai"),
+]
 
 
 class LLMGateway:
@@ -19,81 +79,90 @@ class LLMGateway:
     def __init__(self, config: dict[str, Any]):
         """根据显式配置初始化模型网关。
 
-        支持的 provider:
-        - openai: OpenAI GPT 系列
-        - anthropic: Anthropic Claude 系列
-        - zhipu: 智谱 AI GLM-4 系列
-        - dashscope: 阿里云通义千问系列
-        - ollama: 本地模型（通过 Ollama）
+        config 关键字段：
+        - provider: openai | responses | anthropic
+        - api_key / base_url / model / temperature / max_tokens
+        - retry: {"max_attempts": 3}（可选）
+        - timeout: 秒（默认 60）
+        - fallback: {"provider": ..., "api_key": ..., ...}（可选）
         """
-        self.adapter: BaseAdapter
+        config = dict(config)
         provider = config.get("provider", "openai")
-
-        if provider == "openai":
-            adapter_kwargs = {
-                "api_key": config["api_key"],
-                "model": config.get("model", "gpt-4o"),
-                "temperature": config.get("temperature", 0.2),
-                "max_tokens": config.get("max_tokens", 4096),
+        if provider in {"zhipu", "dashscope", "ollama"}:
+            warnings.warn(
+                f"provider={provider} is deprecated; use openai with base_url",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            defaults = {
+                "zhipu": ("https://open.bigmodel.cn/api/paas/v4/", "glm-4"),
+                "dashscope": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+                "ollama": ("http://localhost:11434/v1", "llama3"),
             }
-            if config.get("base_url"):
-                adapter_kwargs["base_url"] = config["base_url"]
-            if config.get("extra_body"):
-                adapter_kwargs["extra_body"] = config["extra_body"]
+            url, model = defaults[provider]
+            config.setdefault("base_url", url)
+            config.setdefault("model", model)
+            provider = "openai"
+        spec = _PROVIDER_SPECS.get(provider)
+        if spec is None:
+            raise ValueError(f"不支持的 provider: {provider}（可选: {', '.join(_PROVIDER_SPECS)}）")
 
-            self.adapter = OpenAIAdapter(**adapter_kwargs)
-
-        elif provider == "anthropic":
-            adapter_kwargs = {
-                "api_key": config["api_key"],
-                "model": config.get("model", "claude-sonnet-4-6"),
-                "temperature": config.get("temperature", 0.2),
-                "max_tokens": config.get("max_tokens", 4096),
-            }
-            self.adapter = AnthropicAdapter(**adapter_kwargs)
-
-        elif provider == "zhipu":
-            adapter_kwargs = {
-                "api_key": config["api_key"],
-                "model": config.get("model", "glm-4"),
-                "temperature": config.get("temperature", 0.2),
-                "max_tokens": config.get("max_tokens", 4096),
-            }
-            if config.get("base_url"):
-                adapter_kwargs["base_url"] = config["base_url"]
-            self.adapter = ZhipuAdapter(**adapter_kwargs)
-
-        elif provider == "dashscope":
-            adapter_kwargs = {
-                "api_key": config["api_key"],
-                "model": config.get("model", "qwen-max"),
-                "temperature": config.get("temperature", 0.2),
-                "max_tokens": config.get("max_tokens", 4096),
-            }
-            if config.get("base_url"):
-                adapter_kwargs["base_url"] = config["base_url"]
-            self.adapter = DashScopeAdapter(**adapter_kwargs)
-
-        elif provider == "ollama":
-            adapter_kwargs = {
-                "model": config.get("model", "llama3"),
-                "base_url": config.get("base_url", "http://localhost:11434"),
-                "temperature": config.get("temperature", 0.2),
-                "max_tokens": config.get("max_tokens", 4096),
-            }
-            self.adapter = OllamaAdapter(**adapter_kwargs)
-
+        adapter_kwargs: dict[str, Any] = {
+            "api_key": config.get("api_key") or "missing",
+            "model": config.get("model", spec["default_model"]),
+            "temperature": config.get("temperature", 0.2),
+        }
+        if provider == "responses":
+            adapter_kwargs["max_output_tokens"] = config.get(
+                "max_output_tokens", config.get("max_tokens", 4096)
+            )
         else:
-            raise ValueError(f"不支持的 provider: {provider}")
+            adapter_kwargs["max_tokens"] = config.get("max_tokens", 4096)
+        if config.get("base_url"):
+            adapter_kwargs["base_url"] = config["base_url"]
+        # 透传其余 provider 专属参数（如 enable_prompt_caching）
+        known = {
+            "provider",
+            "api_key",
+            "model",
+            "base_url",
+            "temperature",
+            "max_tokens",
+            "max_output_tokens",
+            "retry",
+            "timeout",
+            "fallback",
+            "adapter",
+            "adapter_factory",
+        }
+        adapter_kwargs.update({k: v for k, v in config.items() if k not in known})
 
-        self.retry_policy = config.get("retry", {"max_attempts": 3})
-        self.timeout = config.get("timeout", 60)
+        self.adapter: BaseAdapter = config.get("adapter") or (
+            config.get("adapter_factory") or spec["adapter"]
+        )(**adapter_kwargs)
+        self.provider = provider
+        self.retry_policy = config.get("retry") or {"max_attempts": 3}
+        if not isinstance(self.retry_policy, dict):
+            raise ValueError("retry must be a configuration mapping")
+        for key in ("base_delay", "max_delay"):
+            if float(self.retry_policy.get(key, 1)) < 0:
+                raise ValueError(f"retry.{key} must be nonnegative")
+        if int(self.retry_policy.get("max_attempts", 3)) < 1:
+            raise ValueError("retry.max_attempts must be positive")
+        self.timeout = float(config.get("timeout", 60))
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self._fallback_gateway = None
+        self._owns_fallback = False
         self._fallback_adapter: BaseAdapter | None = None
 
-        # 配置 fallback 链
         fallback_config = config.get("fallback")
         if fallback_config:
-            self._fallback_adapter = self._create_fallback_adapter(fallback_config)
+            self._fallback_gateway = LLMGateway(fallback_config)
+            self._fallback_adapter = self._fallback_gateway.adapter
+            self._owns_fallback = True
+
+    # ── from_env ─────────────────────────────────────────────────────
 
     @classmethod
     def from_env(
@@ -106,45 +175,28 @@ class LLMGateway:
         model: str | None = None,
         **config: Any,
     ) -> "LLMGateway":
-        """
-        从环境变量创建 LLMGateway。
+        """从环境变量创建 LLMGateway。
 
-        支持的 provider：
-        - openai: 环境变量前缀 OPENAI_（默认）
-        - anthropic: 环境变量前缀 ANTHROPIC_
-        - zhipu: 环境变量前缀 ZHIPU_
-        - dashscope: 环境变量前缀 DASHSCOPE_
-        - ollama: 环境变量前缀 OLLAMA_
-
-        环境变量命名固定为：
-        - `{PREFIX}_API_KEY`
-        - `{PREFIX}_BASE_URL`
-        - `{PREFIX}_MODEL`
+        环境变量命名：{PREFIX}_API_KEY / {PREFIX}_BASE_URL / {PREFIX}_MODEL
+        - provider 缺省时按 ANTHROPIC_API_KEY → OPENAI_API_KEY 顺序自动探测
+        - env_prefix 用于任意 OpenAI 兼容端点，例如：
+            LLMGateway.from_env(provider="openai", env_prefix="DEEPSEEK")
+          读取 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL / DEEPSEEK_MODEL
         """
-        # 自动检测 provider
         if not provider:
-            # 根据环境变量前缀自动检测
             if env_prefix:
-                provider = env_prefix.lower()
-            elif os.getenv("ANTHROPIC_API_KEY"):
-                provider = "anthropic"
-            elif os.getenv("ZHIPU_API_KEY"):
-                provider = "zhipu"
-            elif os.getenv("DASHSCOPE_API_KEY"):
-                provider = "dashscope"
+                provider = env_prefix.lower().replace("_compatible", "")
+                if provider not in _PROVIDER_SPECS:
+                    provider = "openai"
             else:
                 provider = "openai"
+                for env_name, detected in _PROVIDER_DETECTION:
+                    if os.getenv(env_name) or env_file_has(env_name, env_file):
+                        provider = detected
+                        break
 
-        # 设置默认前缀
         if not env_prefix:
-            prefix_map = {
-                "openai": "OPENAI",
-                "anthropic": "ANTHROPIC",
-                "zhipu": "ZHIPU",
-                "dashscope": "DASHSCOPE",
-                "ollama": "OLLAMA",
-            }
-            env_prefix = prefix_map.get(provider, "OPENAI")
+            env_prefix = _PROVIDER_SPECS.get(provider, {}).get("env_prefix", "OPENAI")
 
         prefix = env_prefix.upper()
         api_key_env = f"{prefix}_API_KEY"
@@ -153,22 +205,18 @@ class LLMGateway:
 
         file_values = cls._load_env_file(env_file=env_file)
 
-        api_key = os.getenv(api_key_env) or file_values.get(api_key_env)
+        def _get(name: str) -> str | None:
+            return os.getenv(name) or file_values.get(name)
 
-        # Ollama 不需要 API key
-        if not api_key and provider != "ollama":
+        api_key = _get(api_key_env)
+        if not api_key and _PROVIDER_SPECS[provider]["requires_api_key"]:
             raise ValueError(f"缺少环境变量: {api_key_env}")
 
-        env_config: dict[str, Any] = {
-            "provider": provider,
-            "api_key": api_key or "ollama",
-        }
-
-        resolved_base_url = base_url or os.getenv(base_url_env) or file_values.get(base_url_env)
+        env_config: dict[str, Any] = {"provider": provider, "api_key": api_key or ""}
+        resolved_base_url = base_url or _get(base_url_env)
         if resolved_base_url:
             env_config["base_url"] = resolved_base_url
-
-        resolved_model = model or os.getenv(model_env) or file_values.get(model_env)
+        resolved_model = model or _get(model_env)
         if resolved_model:
             env_config["model"] = resolved_model
 
@@ -177,16 +225,9 @@ class LLMGateway:
 
     @staticmethod
     def _load_env_file(env_file: str | None = None) -> dict[str, str]:
-        """
-        尝试从 env 文件读取变量。
+        """轻量 .env 解析（不依赖 python-dotenv，不修改 os.environ）。
 
-        规则：
-        1. 如果显式传入 `env_file`，只读取这个文件
-        2. 否则自动查找当前目录和最多 3 层父目录中的 `.env` / `env`
-
-        注意：
-        - 这里只返回解析结果，不会修改 `os.environ`
-        - 这是一个轻量实现，不依赖 `python-dotenv`
+        显式传入 env_file 时只读该文件；否则向上搜索 3 层父目录。
         """
         candidate_paths: list[Path] = []
         if env_file:
@@ -206,22 +247,16 @@ class LLMGateway:
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
-
                 key, value = line.split("=", 1)
                 key = key.strip()
-                value = value.strip()
-
-                if not key:
-                    continue
-
-                if value and value[0] == value[-1] and value[0] in {"'", '"'}:
-                    value = value[1:-1]
-
-                values[key] = value
-
+                value = value.strip().strip("'\"")
+                if key:
+                    values[key] = value
             return values
 
         return {}
+
+    # ── 生成入口 ─────────────────────────────────────────────────────
 
     async def generate(
         self,
@@ -229,11 +264,52 @@ class LLMGateway:
         tools: list[Tool] | None = None,
         stream: bool = False,
         **kwargs,
-    ) -> Union[LLMResponse, AsyncIterator[LLMResponseChunk]]:
+    ) -> LLMResponse | AsyncIterator[LLMResponseChunk]:
         """统一处理单次和流式生成请求。"""
         if stream:
             return self._generate_stream(messages=messages, tools=tools, **kwargs)
         return await self._generate_single(messages=messages, tools=tools, **kwargs)
+
+    # ── 错误分类 ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> str:
+        """按状态码/异常类型分类错误，返回 retryable | fatal | unknown。
+
+        优先读 SDK 异常的 status_code 属性，避免脆弱的字符串匹配。
+        """
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is not None:
+            if status in (408, 409, 429):
+                return "rate_limit"
+            if 500 <= status < 600:
+                return "server_error"
+            if status >= 400:
+                return "fatal"
+            return "unknown"
+        name = type(exc).__name__
+        if name in (
+            "APIConnectionError",
+            "ConnectError",
+            "ConnectTimeout",
+            "ReadError",
+            "RemoteProtocolError",
+        ):
+            return "connection_error"
+        if name in (
+            "APITimeoutError",
+            "TimeoutError",
+            "asyncio.TimeoutError",
+            "ReadTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+        ):
+            return "timeout"
+        return "unknown"
+
+    # ── 非流式 ───────────────────────────────────────────────────────
 
     async def _generate_single(
         self,
@@ -243,181 +319,233 @@ class LLMGateway:
     ) -> LLMResponse:
         """发送一次非流式请求。
 
-        分类重试策略：
-        - 429 Rate Limit → 指数退避，使用 retry-after header
-        - 5xx Server Error → 指数退避
-        - 4xx (except 429) → 不重试（客户端错误）
-        - Timeout → 指数退避
-        - Connection Error → 指数退避
-
-        如果配置了 fallback 链，在耗尽重试后会尝试 fallback。
+        重试策略（按状态码分类）：
+        - 429 → 指数退避（上限 60s）
+        - 5xx / 连接错误 / 超时 → 指数退避
+        - 其它 4xx → 不重试
+        重试耗尽后若配置了 fallback 则切换备用 adapter。
         """
-        request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
         start = time.monotonic()
-        last_exception = None
+        try:
+            async with asyncio.timeout(self.timeout):
+                response = await self._single_attempts(messages, tools, **kwargs)
+        except Exception as exc:
+            if self._fallback_gateway and self._retryable(exc):
+                remaining = self.timeout - (time.monotonic() - start)
+                if remaining <= 0:
+                    raise TimeoutError("Model request overall deadline exceeded") from exc
+                async with asyncio.timeout(remaining):
+                    response = await self._fallback_gateway._generate_single(
+                        messages, tools, **kwargs
+                    )
+            else:
+                raise
+        response.latency_ms = int((time.monotonic() - start) * 1000)
+        return response
 
-        for attempt in range(self.retry_policy["max_attempts"]):
+    @classmethod
+    def register_provider(
+        cls, name, adapter_factory, *, default_model="", env_prefix="OPENAI", requires_api_key=True
+    ):
+        _PROVIDER_SPECS[name] = {
+            "adapter": adapter_factory,
+            "default_model": default_model,
+            "env_prefix": env_prefix,
+            "requires_api_key": requires_api_key,
+        }
+
+    @classmethod
+    def _retryable(cls, exc):
+        return cls._classify_error(exc) in {
+            "rate_limit",
+            "server_error",
+            "connection_error",
+            "timeout",
+        }
+
+    async def _backoff(self, exc, attempt):
+        headers = getattr(getattr(exc, "response", None), "headers", {})
+        retry_after = headers.get("retry-after") if headers else None
+        if retry_after is not None:
             try:
-                raw = await asyncio.wait_for(self.adapter.call(request), timeout=self.timeout)
-                response = self.adapter.parse_response(raw)
-                response.latency_ms = int((time.monotonic() - start) * 1000)
-                return response
-            except asyncio.TimeoutError as exc:
-                last_exception = exc
-                wait_time = 2 ** attempt
-                if attempt < self.retry_policy["max_attempts"] - 1:
-                    await asyncio.sleep(wait_time)
-                    continue
-            except Exception as exc:
-                last_exception = exc
-                error_str = str(exc).lower()
-
-                # 429 — 可重试
-                if "429" in error_str or "rate limit" in error_str:
-                    if attempt < self.retry_policy["max_attempts"] - 1:
-                        wait_time = min(2 ** (attempt + 1), 60)  # cap at 60s for rate limits
-                        await asyncio.sleep(wait_time)
-                        continue
-                # 5xx — 可重试
-                elif any(f"{code}" in error_str for code in ["500", "502", "503", "504"]):
-                    if attempt < self.retry_policy["max_attempts"] - 1:
-                        wait_time = 2 ** attempt
-                        await asyncio.sleep(wait_time)
-                        continue
-                # 4xx (except 429) — 不可重试
-                elif any(f"{code}" in error_str for code in ["400", "401", "403", "404"]):
-                    raise
-                # 连接错误 — 可重试
-                elif "connection" in error_str or "timeout" in error_str:
-                    if attempt < self.retry_policy["max_attempts"] - 1:
-                        wait_time = 2 ** attempt
-                        await asyncio.sleep(wait_time)
-                        continue
-                else:
-                    # 未知错误也重试几次
-                    if attempt < self.retry_policy["max_attempts"] - 1:
-                        wait_time = 2 ** attempt
-                        await asyncio.sleep(wait_time)
-                        continue
-
-        # 尝试 fallback
-        if self._fallback_adapter and last_exception:
-            try:
-                fallback_request = self._fallback_adapter.build_request(
-                    messages=messages, tools=tools, stream=False, **kwargs
-                )
-                raw = await asyncio.wait_for(
-                    self._fallback_adapter.call(fallback_request),
-                    timeout=self.timeout,
-                )
-                response = self._fallback_adapter.parse_response(raw)
-                response.latency_ms = int((time.monotonic() - start) * 1000)
-                return response
-            except Exception:
-                pass
-
-        raise last_exception
-
-    def _create_fallback_adapter(self, config: dict) -> "BaseAdapter":
-        """创建 fallback 适配器"""
-        provider = config.get("provider", "openai")
-
-        if provider == "openai":
-            return OpenAIAdapter(
-                api_key=config["api_key"],
-                model=config.get("model", "gpt-4o-mini"),
-                temperature=config.get("temperature", 0.2),
-                max_tokens=config.get("max_tokens", 4096),
-                base_url=config.get("base_url"),
-                **{k: v for k, v in config.items() if k not in ("provider", "api_key", "model", "temperature", "max_tokens", "base_url")},
-            )
-        elif provider == "anthropic":
-            return AnthropicAdapter(
-                api_key=config["api_key"],
-                model=config.get("model", "claude-sonnet-4-6"),
-                temperature=config.get("temperature", 0.2),
-                max_tokens=config.get("max_tokens", 4096),
-            )
-        elif provider == "ollama":
-            return OllamaAdapter(
-                model=config.get("model", "llama3"),
-                base_url=config.get("base_url", "http://localhost:11434"),
-                temperature=config.get("temperature", 0.2),
-                max_tokens=config.get("max_tokens", 4096),
-            )
+                delay = max(0, float(retry_after))
+            except (TypeError, ValueError):
+                try:
+                    date = parsedate_to_datetime(retry_after)
+                    if date.tzinfo is None:
+                        date = date.replace(tzinfo=UTC)
+                    delay = max(0, (date - datetime.now(UTC)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    delay = float(self.retry_policy.get("base_delay", 1)) * 2**attempt
         else:
-            raise ValueError(f"Unsupported fallback provider: {provider}")
+            delay = float(self.retry_policy.get("base_delay", 1)) * 2**attempt
+            if self.retry_policy.get("jitter", True):
+                delay = random.uniform(delay / 2, delay)
+        await asyncio.sleep(min(delay, float(self.retry_policy.get("max_delay", 60))))
 
-    def set_fallback(self, fallback_gateway: "LLMGateway") -> None:
-        """设置 fallback LLM 网关"""
+    async def _single_attempts(self, messages, tools, **kwargs):
+        request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
+        for attempt in range(int(self.retry_policy.get("max_attempts", 3))):
+            try:
+                raw = await self.adapter.call(request)
+                return self.adapter.parse_response(raw)
+            except Exception as exc:
+                if not self._retryable(exc) or attempt + 1 >= int(
+                    self.retry_policy.get("max_attempts", 3)
+                ):
+                    raise
+                await self._backoff(exc, attempt)
+
+    def _create_fallback_adapter(self, config):
+        return LLMGateway(config).adapter
+
+    def set_fallback(self, fallback_gateway):
+        """Borrow the complete fallback policy; its caller retains lifecycle ownership."""
+        self._fallback_gateway = fallback_gateway
         self._fallback_adapter = fallback_gateway.adapter
+        self._owns_fallback = False
 
-    async def _generate_stream(
-        self,
-        messages: list[Message],
-        tools: list[Tool] | None,
-        **kwargs,
-    ) -> AsyncIterator[LLMResponseChunk]:
-        """发送一次流式请求，并把 tool call 增量拼成完整结构。"""
+    async def aclose(self):
+        close = getattr(self.adapter, "aclose", None)
+        if close:
+            await close()
+        if self._owns_fallback and self._fallback_gateway:
+            await self._fallback_gateway.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.aclose()
+
+    async def _generate_stream(self, messages, tools, **kwargs):
+        observed = False
+        start = time.monotonic()
+        try:
+            async with asyncio.timeout(self.timeout):
+                for attempt in range(int(self.retry_policy.get("max_attempts", 3))):
+                    try:
+                        async for chunk in self._stream_once(messages, tools, **kwargs):
+                            # Publishing even usage/tool metadata commits this request.
+                            observed = True
+                            yield chunk
+                        return
+                    except Exception as exc:
+                        if (
+                            observed
+                            or not self._retryable(exc)
+                            or attempt + 1 >= int(self.retry_policy.get("max_attempts", 3))
+                        ):
+                            raise
+                        await self._backoff(exc, attempt)
+        except Exception as exc:
+            if not observed and self._fallback_gateway and self._retryable(exc):
+                remaining = self.timeout - (time.monotonic() - start)
+                if remaining <= 0:
+                    raise TimeoutError("Model request overall deadline exceeded") from exc
+                async with asyncio.timeout(remaining):
+                    async for chunk in self._fallback_gateway._generate_stream(
+                        messages, tools, **kwargs
+                    ):
+                        yield chunk
+            else:
+                raise
+
+    async def _stream_once(self, messages, tools, **kwargs):
         request = self.adapter.build_request(messages, tools, stream=True, **kwargs)
         stream = await self.adapter.call(request)
-
-        # 按 index 累积工具调用增量。
-        pending: dict[int, dict[str, Any]] = {}
-
-        async for chunk in stream:
-            data = self.adapter.parse_stream_chunk(chunk)
-            if not data:
-                continue
-
-            content = data.get("content", "")
-            reasoning_content = data.get("reasoning_content", "")
-            finish_reason = data.get("finish_reason")
-            tool_calls_delta = data.get("tool_calls_delta")
-
-            if tool_calls_delta:
-                for delta_item in tool_calls_delta:
-                    idx = delta_item["index"]
-                    if idx not in pending:
-                        pending[idx] = {"id": "", "name": "", "arguments": ""}
-                    if "id" in delta_item:
-                        pending[idx]["id"] = delta_item["id"]
-                    if "name" in delta_item:
-                        pending[idx]["name"] = delta_item["name"]
-                    if "arguments" in delta_item:
-                        pending[idx]["arguments"] += delta_item["arguments"]
-
-            out_chunk = LLMResponseChunk(
-                content=content,
-                reasoning_content=reasoning_content or None,
-            )
-
-            if finish_reason == "tool_calls":
-                complete: list[ToolCall] = []
-                for item in pending.values():
-                    if not item["id"] or not item["name"]:
-                        continue
-                    try:
-                        args = json.loads(item["arguments"]) if item["arguments"] else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                    complete.append(
-                        ToolCall(
-                            id=item["id"],
-                            type="function",
-                            function=FunctionCall(name=item["name"], arguments=args),
-                        )
+        pending = {}
+        usage = {}
+        terminal = False
+        reasoning_blocks = {}
+        active_reasoning_index = None
+        provider_metadata = {}
+        try:
+            async for raw in stream:
+                data = self.adapter.parse_stream_chunk(raw)
+                if not data:
+                    continue
+                if terminal and (
+                    data.get("content")
+                    or data.get("reasoning_content")
+                    or data.get("tool_calls_delta")
+                ):
+                    raise ValueError("Model produced content after terminal event")
+                if data.get("usage") is not None:
+                    for key, value in data["usage"].items():
+                        usage[key] = max(usage.get(key, 0), value)
+                    usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
+                        "completion_tokens", 0
                     )
-                out_chunk.tool_calls_complete = complete
-                out_chunk.finish_reason = finish_reason
-            elif finish_reason == "stop":
-                out_chunk.finish_reason = finish_reason
+                deltas = data.get("tool_calls_delta")
+                if deltas:
+                    for delta in deltas:
+                        item = pending.setdefault(
+                            delta["index"], {"id": "", "name": "", "arguments": ""}
+                        )
+                        for key in ("id", "name"):
+                            if delta.get(key):
+                                item[key] = delta[key]
+                        item["arguments"] += delta.get("arguments", "")
+                event_metadata = data.get("provider_metadata", {})
+                start_block = event_metadata.get("anthropic_reasoning_start")
+                if start_block:
+                    active_reasoning_index = start_block["index"]
+                    reasoning_blocks[active_reasoning_index] = dict(start_block["block"])
+                if data.get("reasoning_content") and active_reasoning_index is not None:
+                    block = reasoning_blocks[active_reasoning_index]
+                    block["thinking"] = block.get("thinking", "") + data["reasoning_content"]
+                signature = event_metadata.get("anthropic_signature_delta")
+                if signature:
+                    block = reasoning_blocks[signature["index"]]
+                    block["signature"] = block.get("signature", "") + signature["signature"]
+                if reasoning_blocks:
+                    provider_metadata["anthropic_reasoning"] = list(reasoning_blocks.values())
+                if "responses_reasoning" in event_metadata:
+                    provider_metadata["responses_reasoning"] = event_metadata["responses_reasoning"]
+                raw_reason = data.get("finish_reason")
+                reason = normalize_finish_reason(raw_reason) if raw_reason is not None else None
+                complete = None
+                if reason is not None:
+                    terminal = True
+                if reason == "tool_calls" and not pending:
+                    raise ValueError("Tool-call termination without a tool call")
+                if reason in ("stop", "tool_calls") and pending:
+                    complete = []
+                    for item in pending.values():
+                        if not item["id"] or not item["name"]:
+                            raise ValueError("Incomplete tool call identity")
+                        # Never replace corrupt or truncated JSON with executable empty arguments.
+                        arguments = json.loads(item["arguments"])
+                        if not isinstance(arguments, dict):
+                            raise ValueError("Tool arguments must be a JSON object")
+                        complete.append(
+                            ToolCall(
+                                id=item["id"],
+                                function=FunctionCall(name=item["name"], arguments=arguments),
+                            )
+                        )
+                    reason = "tool_calls"
+                yield LLMResponseChunk(
+                    content=data.get("content", ""),
+                    reasoning_content=data.get("reasoning_content") or None,
+                    metadata=dict(provider_metadata),
+                    tool_calls_delta=deltas,
+                    tool_calls_complete=complete,
+                    finish_reason=reason,
+                    raw_finish_reason=raw_reason,
+                    usage=dict(usage) if usage else None,
+                    usage_available=bool(usage),
+                )
+            if not terminal:
+                raise ValueError("Model stream ended without a terminal event")
+        finally:
+            close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+            if close:
+                await close()
 
-            if hasattr(chunk, "usage") and chunk.usage:
-                out_chunk.usage = {
-                    "prompt_tokens": chunk.usage.prompt_tokens,
-                    "completion_tokens": chunk.usage.completion_tokens,
-                    "total_tokens": chunk.usage.total_tokens,
-                }
 
-            yield out_chunk
+def env_file_has(env_name: str, env_file: str | None = None) -> bool:
+    """检查 env 文件中是否定义了某个变量（供 provider 探测使用）。"""
+    values = LLMGateway._load_env_file(env_file)
+    return env_name in values

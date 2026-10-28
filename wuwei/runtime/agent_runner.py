@@ -1,706 +1,811 @@
-"""新的 AgentRunner - 使用 Middleware 替代 Hook
+"""One event-driven execution engine for ordinary, streamed and delegated runs.
 
-基于 StateGraph 的 Agent 运行时执行器。
-内部构建标准 Agent 图（llm → tools → llm 循环），
-委托给 CompiledGraph 执行。
+Run governance is JSON state; middleware instances hold configuration only.
+Every tool result is committed before advancing. Uncertain side effects are not
+replayed, and an approval consumes one exact call rather than skipping guards.
 """
 
 import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from wuwei.agent.session import AgentSession
-from wuwei.core.message import AIMessage, ToolMessage as CoreToolMessage
-from wuwei.graph.graph import END, CompiledGraph, StateGraph
+from wuwei.core.message import AIMessage, ToolMessage
 from wuwei.graph.state import State
-from wuwei.llm import (
-    AgentEvent,
-    AgentRunResult,
-    LLMGateway,
-    LLMResponse,
-    LLMResponseChunk,
-    Message,
-    ToolCall,
-)
+from wuwei.llm import AgentEvent, AgentRunResult, LLMResponse, Message, ToolCall
 from wuwei.middleware.base import MiddlewareContext
 from wuwei.middleware.stack import MiddlewareStack
-from wuwei.tools import Tool, ToolExecutor
+from wuwei.runtime.action_log import get_or_create_log
+from wuwei.runtime.context import current_context
+from wuwei.runtime.interrupt import InterruptPayload, InterruptSignal
+from wuwei.tools.executor import bind_tool_execution
 
-if TYPE_CHECKING:
-    from wuwei.planning import Task
+
+def _empty_usage():
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _merge_usage(total, usage):
+    for key in total:
+        total[key] += (usage or {}).get(key, 0) or 0
 
 
 class AgentRunner:
-    """单个 agent 会话的运行时执行器。
-
-    内部使用 StateGraph 构建标准 Agent 循环图：
-    agent_node → (有 tool_calls? → tool_node → agent_node | → END)
-
-    中间件生命周期在每个节点内完整调用。
-    """
-
     def __init__(
         self,
-        llm: LLMGateway,
-        tools: list[Tool],
-        tool_executor: ToolExecutor,
+        llm,
+        tools,
+        tool_executor,
         session: AgentSession,
-        middleware: MiddlewareStack | None = None,
-    ) -> None:
+        middleware=None,
+        checkpointer=None,
+        event_bus=None,
+    ):
         self.llm = llm
-        self.tools = tools
+        self.tools = tools  # compatible constructor; effective tools come from registry per call
         self.tool_executor = tool_executor
         self.session = session
-        self.middleware = middleware or MiddlewareStack()
+        self.middleware = middleware if middleware is not None else MiddlewareStack()
+        self.checkpointer = checkpointer
+        self.event_bus = event_bus
+        self._metadata = {}
+        self._parent = None
+        self.response_model = None
+        self.max_output_retries = 2
+        self._resources = {}
+        self._last_ctx = None
 
-    # ── graph construction ──────────────────────────────────────────
-
-    def _build_graph(self) -> CompiledGraph:
-        """构建标准 Agent 循环图。
-
-        Graph 结构:
-            agent_node ──(有 tool_calls?)──▶ tool_node ──▶ agent_node
-                            │
-                            └──(无 tool_calls)──▶ END
-
-        每个节点内部调用完整的中间件生命周期。
-        """
-        graph = StateGraph(State)
-        graph.set_max_steps(self.session.max_steps)
-
-        # Node: agent (LLM 调用)
-        async def agent_node(state: State, config: dict | None = None) -> State:
-            messages = [m for m in state.messages]
-            tools = list(self.tools)
-
-            # before_llm 中间件
-            ctx = MiddlewareContext(state=state, config=config or {}, step=state.step)
-            ctx = await self.middleware.execute_before_llm(ctx)
-            messages = ctx.state.messages if hasattr(ctx.state, 'messages') else messages
-
-            # LLM 调用（通过 wrap_model_call 洋葱模型）
-            async def _direct_call(_messages, _tools):
-                return await self.llm.generate(_messages, tools=_tools)
-
-            response: LLMResponse = await self.middleware.execute_wrap_model_call(
-                ctx, messages, tools, _direct_call
-            )
-
-            # 构建 AI 消息
-            ai_msg = AIMessage(
-                content=response.message.content or "",
-                tool_calls=response.message.tool_calls or [],
-            )
-
-            # after_llm 中间件
-            ctx = await self.middleware.execute_after_llm(ctx, ai_msg)
-
-            state.add_message(ai_msg)
-            state.metadata["_last_usage"] = {
-                "prompt_tokens": response.usage.get("prompt_tokens", 0) if response.usage else 0,
-                "completion_tokens": response.usage.get("completion_tokens", 0) if response.usage else 0,
-                "total_tokens": response.usage.get("total_tokens", 0) if response.usage else 0,
-            }
-            state.metadata["_has_tool_calls"] = bool(response.message.tool_calls)
-            state.metadata["_tool_calls"] = response.message.tool_calls or []
-            return state
-
-        # Node: tools (执行工具)
-        async def tool_node(state: State, config: dict | None = None) -> State:
-            tool_calls: list[ToolCall] = state.metadata.get("_tool_calls", [])
-            ctx = MiddlewareContext(state=state, config=config or {}, step=state.step)
-
-            for tc in tool_calls:
-                # before_tool 中间件
-                modified = await self.middleware.execute_before_tool(ctx, tc)
-                if modified is None:
-                    continue
-                tc = modified
-
-                try:
-                    msg = await self.tool_executor.execute_one(tc)
-                except Exception as exc:
-                    msg = Message(
-                        role="tool",
-                        content=f"工具执行失败: {exc}",
-                        tool_call_id=tc.id,
-                        name=tc.function.name,
-                    )
-
-                # after_tool 中间件
-                tool_msg = CoreToolMessage(
-                    content=msg.content or "",
-                    tool_call_id=msg.tool_call_id or tc.id,
-                    name=msg.name or tc.function.name,
-                )
-                modified_msg = await self.middleware.execute_after_tool(ctx, tool_msg)
-
-                state.add_message(
-                    CoreToolMessage(
-                        role="tool",
-                        content=modified_msg.content or "",
-                        tool_call_id=modified_msg.tool_call_id,
-                        name=modified_msg.name,
-                    )
-                )
-            return state
-
-        # Condition: 是否还有 tool calls
-        async def should_continue(state: State, config: dict | None = None) -> str:
-            if state.metadata.get("_has_tool_calls"):
-                return "continue"
-            return "end"
-
-        graph.add_node("agent", agent_node)
-        graph.add_node("tools", tool_node)
-        graph.set_entry_point("agent")
-        graph.add_conditional_edges(
-            "agent",
-            should_continue,
-            {"continue": "tools", "end": END},
-        )
-        graph.add_edge("tools", "agent")
-
-        return graph.compile()
-
-    # ── public API ──────────────────────────────────────────────────
-
-    async def run(
-        self,
-        user_input: str,
-        stream: bool = False,
-        task: "Task | None" = None,
-    ):
-        """执行一次 agent 运行。"""
+    async def run(self, user_input, stream=False, task=None):
         if stream:
-            return self._run_stream(user_input, task=task)
-        return await self._run_non_stream(user_input, task=task)
+            return self._iter_events(user_input, stream=True, task=task)
+        return await self._collect(self._iter_events(user_input, stream=False, task=task))
 
-    @staticmethod
-    def _empty_usage() -> dict[str, int]:
-        return {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
+    def stream_events(self, user_input, *, task=None):
+        return self._iter_events(user_input, stream=True, task=task)
 
-    def _merge_usage(self, total: dict[str, int], usage: dict[str, int] | None) -> None:
-        if not usage:
-            return
+    async def _collect(self, events):
+        result = None
+        async for event in events:
+            if event.type == "run_end":
+                result = AgentRunResult(**event.data)
+        if result is None:
+            raise RuntimeError("Run ended without a committed terminal result")
+        return result
 
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            total[key] = total.get(key, 0) + usage.get(key, 0)
-
-    def _set_session_run_stats(
-        self,
-        *,
-        usage: dict[str, int],
-        latency_ms: int,
-        llm_calls: int,
-    ) -> None:
-        self.session.last_usage = dict(usage)
-        self.session.last_latency_ms = latency_ms
-        self.session.last_llm_calls = llm_calls
-
-    def _build_run_result(
-        self,
-        *,
-        content: str,
-        usage: dict[str, int],
-        latency_ms: int,
-        llm_calls: int,
-    ) -> AgentRunResult:
-        self._set_session_run_stats(
-            usage=usage,
-            latency_ms=latency_ms,
-            llm_calls=llm_calls,
+    async def resume(self, interrupt, *, approved=True, reason="", state=None):
+        payload = (
+            InterruptPayload.from_dict(interrupt) if isinstance(interrupt, dict) else interrupt
         )
-        return AgentRunResult(
-            content=content,
-            usage=dict(usage),
-            latency_ms=latency_ms,
-            llm_calls=llm_calls,
-        )
-
-    def _build_event(
-        self,
-        event_type: str,
-        *,
-        step: int,
-        run_id: str | None = None,
-        data: dict | None = None,
-    ) -> AgentEvent:
-        return AgentEvent(
-            type=event_type,
-            session_id=self.session.session_id,
-            step=step,
-            run_id=run_id,
-            data=data or {},
-        )
-
-    async def _emit_event(
-        self,
-        event_type: str,
-        *,
-        step: int,
-        run_id: str | None = None,
-        data: dict | None = None,
-    ) -> AgentEvent:
-        event = self._build_event(event_type, step=step, run_id=run_id, data=data)
-        # Middleware 不直接支持 emit_event，跳过
-        return event
-
-    async def stream_events(
-        self,
-        user_input: str,
-        *,
-        task: "Task | None" = None,
-    ) -> AsyncIterator[AgentEvent]:
-        """以结构化事件流的形式执行一次 agent 运行。
-
-        完整中间件生命周期：
-        before_llm → llm.stream() → after_llm → before_tool → tool.execute() → after_tool
-        """
-        step_count = 0
-        llm_calls = 0
-        total_latency_ms = 0
-        total_usage = self._empty_usage()
-        run_id = uuid4().hex
-        context = self.session.context
-        context.add_user_message(user_input)
-        yield self._build_event("run_start", step=0, run_id=run_id, data={"input": user_input})
-
-        try:
-            while step_count < self.session.max_steps:
-                content_parts: list[str] = []
-                reasoning_parts: list[str] = []
-                full_tool_calls = None
-                messages = self._copy_messages()
-                tools = list(self.tools)
-
-                # --- before_llm 中间件 ---
-                ctx = MiddlewareContext(
-                    state=None,
-                    config={},
-                    step=step_count,
-                )
-                ctx.state = type('State', (), {'messages': messages, 'metadata': {}})()
-                ctx = await self.middleware.execute_before_llm(ctx)
-                messages = ctx.state.messages
-
-                llm_start = time.monotonic()
-                yield self._build_event(
-                    "llm_start",
-                    step=step_count,
-                    run_id=run_id,
-                    data={"tools": [tool.name for tool in tools]},
-                )
-                stream: AsyncIterator[LLMResponseChunk] = await self.llm.generate(
-                    messages,
-                    tools=tools,
-                    stream=True,
-                )
-                llm_calls += 1
-
-                async for chunk in stream:
-                    if chunk.reasoning_content:
-                        reasoning_parts.append(chunk.reasoning_content)
-                        yield self._build_event(
-                            "reasoning_delta",
-                            step=step_count,
-                            run_id=run_id,
-                            data={"content": chunk.reasoning_content},
-                        )
-
-                    if chunk.content:
-                        content_parts.append(chunk.content)
-                        yield self._build_event(
-                            "text_delta",
-                            step=step_count,
-                            run_id=run_id,
-                            data={"content": chunk.content},
-                        )
-
-                    self._merge_usage(total_usage, chunk.usage)
-
-                    if chunk.tool_calls_complete:
-                        full_tool_calls = chunk.tool_calls_complete
-
-                total_latency_ms += int((time.monotonic() - llm_start) * 1000)
-                yield self._build_event(
-                    "llm_end",
-                    step=step_count,
-                    run_id=run_id,
-                    data={
-                        "latency_ms": total_latency_ms,
-                        "usage": dict(total_usage),
-                        "has_tool_calls": bool(full_tool_calls),
-                    },
-                )
-
-                # 构建 AIMessage 并调用 after_llm 中间件
-                from wuwei.core.message import AIMessage as AIMsg
-                ai_msg = AIMsg(
-                    content="".join(content_parts),
-                    tool_calls=full_tool_calls or [],
-                    reasoning_content="".join(reasoning_parts) or None,
-                )
-                ctx = await self.middleware.execute_after_llm(ctx, ai_msg)
-
-                context.add_ai_message(
-                    "".join(content_parts),
-                    tool_calls=full_tool_calls,
-                    reasoning_content="".join(reasoning_parts) or None,
-                )
-
-                if full_tool_calls:
-                    # --- 工具执行（含 before_tool / after_tool 中间件） ---
-                    for tool_call in full_tool_calls:
-                        # before_tool 中间件
-                        modified_call = await self.middleware.execute_before_tool(ctx, tool_call)
-                        if modified_call is None:
-                            continue
-                        tool_call = modified_call
-
-                        tool = self.tool_executor.registry.get(tool_call.function.name)
-                        yield self._build_event(
-                            "tool_start",
-                            step=step_count,
-                            run_id=run_id,
-                            data={
-                                "tool_name": tool_call.function.name,
-                                "display_name": tool.display_name if tool else None,
-                                "args": tool_call.function.arguments,
-                                "tool_call_id": tool_call.id,
-                            },
-                        )
-
-                        tool_message = await self._execute_one_tool_call(
-                            tool_call,
-                            step=step_count,
-                            task=task,
-                            run_id=run_id,
-                        )
-
-                        # after_tool 中间件
-                        from wuwei.core.message import ToolMessage as TMsg
-                        tool_msg = TMsg(
-                            content=tool_message.content or "",
-                            tool_call_id=tool_message.tool_call_id or "",
-                            name=tool_message.name or "",
-                        )
-                        modified_msg = await self.middleware.execute_after_tool(ctx, tool_msg)
-                        tool_message = Message(
-                            role="tool",
-                            content=modified_msg.content or "",
-                            tool_call_id=modified_msg.tool_call_id,
-                            name=modified_msg.name,
-                        )
-                        self.session.context.add_tool_message(
-                            tool_message.content or "",
-                            tool_message.tool_call_id,
-                        )
-
-                        yield self._build_event(
-                            "tool_end",
-                            step=step_count,
-                            run_id=run_id,
-                            data={
-                                "tool_name": tool_call.function.name,
-                                "tool_call_id": tool_call.id,
-                                "output": tool_message.content,
-                            },
-                        )
-
-                        error_message = self.tool_executor.extract_error_message(
-                            tool_message.content
-                        )
-                        if error_message:
-                            yield self._build_event(
-                                "error",
-                                step=step_count,
-                                run_id=run_id,
-                                data={
-                                    "message": error_message,
-                                    "tool_name": tool_call.function.name,
-                                    "tool_call_id": tool_call.id,
-                                },
-                            )
-
-                    step_count += 1
-                    continue
-
-                done_event = self._build_event(
-                    "done",
-                    step=step_count,
-                    run_id=run_id,
-                    data={
-                        "usage": dict(total_usage),
-                        "latency_ms": total_latency_ms,
-                        "llm_calls": llm_calls,
-                    },
-                )
-                yield done_event
-                yield self._build_event(
-                    "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
-                )
-                self._set_session_run_stats(
-                    usage=total_usage,
-                    latency_ms=total_latency_ms,
-                    llm_calls=llm_calls,
-                )
-                return
-
-            limit_message = "任务未完成，已达到最大步骤限制。"
-            context.add_ai_message(limit_message)
-            yield self._build_event(
-                "text_delta",
-                step=step_count,
-                run_id=run_id,
-                data={"content": limit_message},
-            )
-            done_event = self._build_event(
-                "done",
-                step=step_count,
-                run_id=run_id,
-                data={
-                    "reason": "max_steps",
-                    "usage": dict(total_usage),
-                    "latency_ms": total_latency_ms,
-                    "llm_calls": llm_calls,
+        if self.checkpointer is None:
+            raise ValueError("resume requires checkpointer")
+        loaded = state if state is not None else await self.checkpointer.load(payload.checkpoint_id)
+        if loaded.metadata.get("session_id") != self.session.session_id:
+            raise ValueError("Interrupt session does not match checkpoint")
+        kind = loaded.metadata.get("kind")
+        if kind not in ("interrupt", "pre_tool", "step", "tool_result", "fork"):
+            raise ValueError("Checkpoint is not safely resumable; tool outcome may be unknown")
+        pending = loaded.metadata.get("pending_tool_calls", [])
+        if kind == "interrupt":
+            target = loaded.metadata.get("approval_call") or (pending[0] if pending else None)
+            if target is None:
+                raise ValueError("Interrupt checkpoint has no pending approval")
+            expected = ToolCall.model_validate(target)
+            if (
+                payload.tool_name != expected.function.name
+                or payload.tool_args != expected.function.arguments
+            ):
+                raise ValueError("Approval arguments do not match the saved call")
+            if payload.tool_call_id and payload.tool_call_id != expected.id:
+                raise ValueError("Approval tool_call_id does not match checkpoint")
+            if payload.run_id and payload.run_id != loaded.metadata.get("run_id"):
+                raise ValueError("Approval run does not match checkpoint")
+        saved_run = loaded.metadata.get("run_state") or {}
+        cached = saved_run.get("batch_results", {})
+        if any(
+            saved_run.get("tool_states", {}).get(tc["id"]) in ("running", "unknown")
+            and tc["id"] not in cached
+            for tc in pending
+        ):
+            raise ValueError("Pending tool outcome unknown; reconcile instead of replay")
+        if not await self.checkpointer.claim(payload.checkpoint_id):
+            raise ValueError("Checkpoint already consumed or superseded; 不可重复恢复")
+        return await self._collect(
+            self._iter_events(
+                None,
+                stream=False,
+                resume={
+                    "state": loaded,
+                    "payload": payload,
+                    "approved": approved,
+                    "reason": reason,
                 },
             )
-            yield done_event
-            yield self._build_event(
-                "run_end", step=step_count, run_id=run_id, data=dict(done_event.data)
+        )
+
+    async def _iter_events(self, user_input, *, stream, task=None, resume=None):
+        async with self.session.lock:
+            if resume is None and self.session.metadata.get("_blocked_run"):
+                raise ValueError(
+                    "Session has an unknown tool outcome; reconcile externally before resetting the session"
+                )
+            if resume is None and self.session.metadata.get("_pending_interrupt"):
+                raise ValueError(
+                    "Session has an interrupted run; resume it before starting another run"
+                )
+            async for event in self._execute_events(
+                user_input, stream=stream, task=task, resume=resume
+            ):
+                yield event
+
+    def _ctx(self):
+        meta = self._metadata
+        ctx = MiddlewareContext(
+            state=State(
+                messages=self._copy_messages(),
+                step=meta["step_index"],
+                metadata={"session_id": self.session.session_id, "run_id": meta["run_id"]},
+            ),
+            config={
+                "tool_executor": self.tool_executor,
+                "checkpointer": self.checkpointer,
+                "middleware": self.middleware,
+                "event_bus": self.event_bus,
+                "session": self.session,
+                "parent_context": self._parent,
+                "_runtime_resources": self._resources,
+            },
+            step=meta["step_index"],
+            metadata=meta,
+        )
+        ctx.config["model_call"] = lambda messages, tools=None: self._middleware_model_call(
+            ctx, messages, tools
+        )
+        self._last_ctx = ctx
+        return ctx
+
+    async def _middleware_model_call(self, ctx, messages, tools=None):
+        from wuwei.middleware.budget import BudgetMiddleware
+
+        budgets = [mw for mw in self.middleware.middlewares if isinstance(mw, BudgetMiddleware)]
+        for mw in budgets:
+            await mw.before_llm(ctx)
+        started = time.monotonic()
+        response = await self.llm.generate(messages, tools=tools, stream=False)
+        self._charge_usage(
+            response.usage,
+            int((time.monotonic() - started) * 1000),
+            response.model,
+            getattr(response, "usage_available", True),
+        )
+        for mw in budgets:
+            await mw.after_llm(ctx, response.message)
+        return response
+
+    async def _close_resources(self):
+        ctx = self._last_ctx
+        if ctx is not None:
+            for middleware in reversed(self.middleware.middlewares):
+                close = getattr(middleware, "aclose", None)
+                if close is not None:
+                    await close(ctx)
+
+    async def _in_context(self, ctx, fn, *args):
+        token = current_context.set(ctx)
+        try:
+            return await fn(*args)
+        finally:
+            current_context.reset(token)
+
+    async def _save_checkpoint(self, *, kind, pending=None, approval_call=None, continuation=None):
+        if self.checkpointer is None:
+            return None
+        meta = self._metadata
+        metadata = {
+            "schema_version": 1,
+            "kind": kind,
+            "session_id": self.session.session_id,
+            "run_id": meta["run_id"],
+            "step": meta["step_index"],
+            "run_state": {k: v for k, v in meta.items() if k != "background_tasks"},
+            "session": self.session.to_dict(),
+            "pending_tool_calls": [tc.model_dump(mode="json") for tc in pending or []],
+        }
+        if approval_call is not None:
+            metadata["approval_call"] = approval_call.model_dump(mode="json")
+        if continuation is not None:
+            metadata["continuation"] = continuation
+        ancestor = self._parent
+        if ancestor is not None:
+            while ancestor.config.get("parent_context") is not None:
+                ancestor = ancestor.config["parent_context"]
+            metadata["ancestor_state"] = {
+                k: v
+                for k, v in ancestor.metadata.items()
+                if k not in ("background_tasks", "ancestor_state")
+            }
+        state = State(messages=self._copy_messages(), metadata=metadata, step=meta["step_index"])
+        return await self.checkpointer.save(state, metadata=metadata)
+
+    def _charge_usage(self, usage, latency_ms, model, available=True):
+        meta = self._metadata
+        _merge_usage(meta["usage_total"], usage)
+        meta["usage_available"] = meta.get("usage_available", True) and available
+        meta["llm_calls"] += 1
+        meta["latency_ms"] += latency_ms
+        record = {"model": model, "usage": dict(usage or {}), "latency_ms": latency_ms}
+        meta.setdefault("usage_records", []).append(record)
+        parent = self._parent
+        while parent is not None:
+            _merge_usage(parent.metadata["usage_total"], usage)
+            parent.metadata["usage_available"] = (
+                parent.metadata.get("usage_available", True) and available
             )
-            self._set_session_run_stats(
-                usage=total_usage,
-                latency_ms=total_latency_ms,
-                llm_calls=llm_calls,
-            )
+            parent.metadata["llm_calls"] += 1
+            parent.metadata["latency_ms"] += latency_ms
+            parent.metadata.setdefault("usage_records", []).append(record)
+            parent = parent.config.get("parent_context")
+
+    async def _execute_events(self, user_input, *, stream, task=None, resume=None):
+        self._parent = current_context.get()
+        run_id = uuid4().hex
+        self._metadata = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "session_id": self.session.session_id,
+            "step_index": 0,
+            "usage_total": _empty_usage(),
+            "llm_calls": 0,
+            "latency_ms": 0,
+            "permission_state": {},
+            "approval_decisions": {},
+            "tool_states": {},
+            "usage_records": [],
+            "status": "running",
+        }
+        pending = []
+        if resume:
+            saved = resume["state"]
+            if self._parent is None and saved.metadata.get("ancestor_state"):
+                self._parent = MiddlewareContext(
+                    state=State(), config={}, metadata=saved.metadata["ancestor_state"]
+                )
+            self._metadata.update(saved.metadata.get("run_state") or {})
+            self._metadata["run_id"] = saved.metadata.get("run_id") or run_id
+            self.session.context.replace_messages([m.model_copy(deep=True) for m in saved.messages])
+            pending = [
+                ToolCall.model_validate(tc) for tc in saved.metadata.get("pending_tool_calls", [])
+            ]
+            if saved.metadata.get("continuation"):
+                self._metadata["continuation_decision"] = {
+                    "approved": resume["approved"],
+                    "reason": resume["reason"],
+                }
+            elif saved.metadata.get("kind") == "interrupt":
+                tc = ToolCall.model_validate(saved.metadata.get("approval_call") or pending[0])
+                self._metadata["approval_decisions"][tc.id] = {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                    "approved": resume["approved"],
+                    "reason": resume["reason"],
+                }
+            self.session.metadata.pop("_pending_interrupt", None)
+        else:
+            self.session.context.add_user_message(user_input)
+        meta = self._metadata
+        if self.response_model is not None:
+            meta["structured_schema"] = self.response_model.model_json_schema()
+            meta["output_max_retries"] = self.max_output_retries
+        if self._parent is not None:
+            meta["permission_state"] = self._parent.metadata.setdefault("permission_state", {})
+        run_id = meta["run_id"]
+        final_content = ""
+        status = "completed"
+        termination_reason = None
+        yield self._event("run_start", data={"resumed": bool(resume), "input": user_input})
+        try:
+            while meta["step_index"] < self.session.max_steps:
+                ctx = self._ctx()
+                if not pending:
+                    ctx = await self._in_context(ctx, self.middleware.execute_before_llm, ctx)
+                    if meta.get("structured_schema"):
+                        from wuwei.core.message import SystemMessage
+
+                        ctx.state.messages.insert(
+                            0,
+                            SystemMessage(
+                                content="只输出符合以下JSON Schema的JSON对象："
+                                + json.dumps(meta["structured_schema"], ensure_ascii=False)
+                            ),
+                        )
+                    effective_tools = self.tool_executor.registry.list_tools()
+                    yield self._event(
+                        "llm_start", data={"tools": [t.name for t in effective_tools]}
+                    )
+                    start = time.monotonic()
+                    call_usage = _empty_usage()
+                    content = []
+                    reasoning = []
+                    provider_meta = {}
+                    finish = None
+                    model = ""
+                    usage_available = False
+
+                    async def invoke(messages, tools):
+                        return await self.llm.generate(messages, tools=tools, stream=stream)
+
+                    result = await self._in_context(
+                        ctx,
+                        self.middleware.execute_wrap_model_call,
+                        ctx,
+                        ctx.state.messages,
+                        effective_tools,
+                        invoke,
+                    )
+                    if isinstance(result, LLMResponse):
+                        usage_available = result.usage_available
+                        content.append(result.message.content or "")
+                        reasoning.append(result.message.reasoning_content or "")
+                        pending = result.message.tool_calls or []
+                        provider_meta.update(result.message.metadata)
+                        _merge_usage(call_usage, result.usage)
+                        finish = result.finish_reason
+                        model = result.model
+                    else:
+                        try:
+                            async for chunk in result:
+                                usage_available = (
+                                    usage_available
+                                    or getattr(chunk, "usage_available", False)
+                                    or any((chunk.usage or {}).values())
+                                )
+                                if chunk.content:
+                                    content.append(chunk.content)
+                                    yield self._event("text_delta", data={"content": chunk.content})
+                                if chunk.reasoning_content:
+                                    reasoning.append(chunk.reasoning_content)
+                                    yield self._event(
+                                        "reasoning_delta", data={"content": chunk.reasoning_content}
+                                    )
+                                provider_meta.update(getattr(chunk, "metadata", {}) or {})
+                                if chunk.tool_calls_complete:
+                                    pending = chunk.tool_calls_complete
+                                if chunk.finish_reason:
+                                    finish = chunk.finish_reason
+                                for key in call_usage:
+                                    call_usage[key] = max(
+                                        call_usage[key], (chunk.usage or {}).get(key, 0) or 0
+                                    )
+                        finally:
+                            close = getattr(result, "aclose", None)
+                            if close:
+                                await close()
+                    latency = int((time.monotonic() - start) * 1000)
+                    self._charge_usage(call_usage, latency, model, usage_available)
+                    ai_msg = AIMessage(
+                        content="".join(content),
+                        reasoning_content="".join(reasoning) or None,
+                        tool_calls=pending,
+                        metadata=provider_meta,
+                    )
+                    # Store the full provider reasoning representation before later replay.
+                    self.session.context.get_messages().append(ai_msg)
+                    yield self._event(
+                        "llm_end",
+                        data={
+                            "latency_ms": meta["latency_ms"],
+                            "step_latency_ms": latency,
+                            "usage": dict(meta["usage_total"]),
+                            "has_tool_calls": bool(pending),
+                        },
+                    )
+                    ctx = await self._in_context(
+                        ctx, self.middleware.execute_after_llm, ctx, ai_msg
+                    )
+                    get_or_create_log(self.session).append(
+                        run_id=run_id,
+                        agent=self.session.session_id,
+                        step=meta["step_index"],
+                        kind="llm",
+                        summary=ai_msg.content[:200],
+                        data={"tool_calls": [tc.model_dump(mode="json") for tc in pending]},
+                    )
+                    final_content = ai_msg.content
+                    if finish not in ("stop", "tool_calls"):
+                        pending = []  # No partial tools execute on length/abort/unknown.
+                        status = (
+                            "cancelled"
+                            if finish in ("cancelled", "aborted", "abort")
+                            else "incomplete"
+                        )
+                        termination_reason = finish or "stream_incomplete"
+                        meta["step_index"] += 1
+                        break
+                    if not pending:
+                        if meta.get("structured_schema"):
+                            from jsonschema import validate
+                            from wuwei.agent.agent import _extract_json
+                            from wuwei.core.errors import LLMError
+
+                            try:
+                                data = _extract_json(final_content)
+                                if data is None:
+                                    raise ValueError("Output is not valid JSON")
+                                validate(data, meta["structured_schema"])
+                                if self.response_model is not None:
+                                    data = self.response_model.model_validate(data).model_dump(
+                                        mode="json"
+                                    )
+                                meta["structured_output"] = data
+                            except Exception as validation_error:
+                                attempts = meta.get("output_validation_failures", 0) + 1
+                                meta["output_validation_failures"] = attempts
+                                if attempts > meta.get("output_max_retries", 2):
+                                    raise LLMError(
+                                        f"结构化输出校验失败: {validation_error}"
+                                    ) from validation_error
+                                self.session.context.add_user_message(
+                                    "输出JSON校验失败，请纠正：" + str(validation_error)[:1000]
+                                )
+                                meta["step_index"] += 1
+                                continue
+                        meta["step_index"] += 1
+                        break
+                    await self._save_checkpoint(kind="pre_tool", pending=pending)
+                try:
+                    async for event in self._run_tool_phase(ctx=ctx, tool_calls=pending):
+                        yield event
+                except InterruptSignal as sig:
+                    if self.checkpointer is None:
+                        raise ValueError("interrupt requires checkpointer") from sig
+                    continuation = getattr(sig, "continuation", None)
+                    cid = await self._save_checkpoint(
+                        kind="interrupt",
+                        pending=sig.pending,
+                        approval_call=sig.tool_call,
+                        continuation=continuation,
+                    )
+                    payload = InterruptPayload(
+                        checkpoint_id=cid,
+                        session_id=self.session.session_id,
+                        tool_name=sig.tool_call.function.name,
+                        tool_args=dict(sig.tool_call.function.arguments),
+                        reason=sig.reason,
+                        run_id=run_id,
+                        tool_call_id=sig.tool_call.id,
+                        continuation=continuation,
+                    )
+                    self.session.metadata["_pending_interrupt"] = cid
+                    yield self._event("approval_required", data=payload.to_dict())
+                    async for event in self._finish(
+                        final_content, "interrupted", interrupt=payload.to_dict()
+                    ):
+                        yield event
+                    return
+                if meta.pop("unknown_tool", False):
+                    status = "unknown"
+                    termination_reason = "tool_outcome_unknown"
+                    final_content = "工具结果不确定，请核对实际结果后再继续，未自动重试。"
+                    break
+                pending = []
+                meta["step_index"] += 1
+                await self._save_checkpoint(kind="step")
+            else:
+                status = "incomplete"
+                termination_reason = "max_steps"
+                final_content = "任务未完成，已达到最大步骤限制。"
+                self.session.context.add_ai_message(final_content)
+                yield self._event("text_delta", data={"content": final_content})
+            async for event in self._finish(
+                final_content, status, termination_reason=termination_reason
+            ):
+                yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            self._block_uncertain_tools()
+            await self._close_background_tasks()
+            await self._close_resources()
+            meta["status"] = "cancelled"
+            self._set_session_run_stats()
+            # Persist the last running tool marker; recovery must reconcile it, not replay it.
+            await self._save_checkpoint(kind="cancelled")
+            raise
         except Exception as exc:
-            self._set_session_run_stats(
-                usage=total_usage,
-                latency_ms=total_latency_ms,
-                llm_calls=llm_calls,
-            )
-            # --- on_error 中间件 ---
-            ctx = MiddlewareContext(state=None, config={}, step=llm_calls)
-            ctx.state = type('State', (), {'messages': [], 'metadata': {}})()
-            await self.middleware.execute_on_error(ctx, exc)
-            yield self._build_event(
+            self._block_uncertain_tools()
+            await self._close_background_tasks()
+            await self._close_resources()
+            meta["status"] = "error"
+            self._set_session_run_stats()
+            ctx = self._ctx()
+            await self._in_context(ctx, self.middleware.execute_on_error, ctx, exc)
+            await self._save_checkpoint(kind="error")
+            yield self._event(
                 "error",
-                step=step_count,
-                run_id=run_id,
                 data={
                     "message": str(exc),
                     "error_type": type(exc).__name__,
-                    "usage": dict(total_usage),
-                    "latency_ms": total_latency_ms,
-                    "llm_calls": llm_calls,
+                    "usage": dict(meta["usage_total"]),
+                    "llm_calls": meta["llm_calls"],
                 },
             )
+            raise
 
-    def _copy_messages(self) -> list[Message]:
-        return [message.model_copy(deep=True) for message in self.session.context.get_messages()]
+    async def _close_background_tasks(self):
+        tasks = self._metadata.pop("background_tasks", [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _append_tool_messages(self, tool_messages: list[Message]) -> None:
-        """把工具输出写回当前会话上下文。"""
-        for tool_message in tool_messages:
-            self.session.context.add_tool_message(
-                tool_message.content or "", tool_message.tool_call_id
-            )
+    async def _finish(self, content, status, termination_reason=None, interrupt=None):
+        await self._close_background_tasks()
+        await self._close_resources()
+        if self._metadata.get("unknown_tool"):
+            status = "unknown"
+            termination_reason = "tool_outcome_unknown"
+            content = "工具结果不确定，请核对实际结果后再继续，未自动重试。"
+        self._metadata["status"] = status
+        if status == "unknown":
+            self.session.metadata["_blocked_run"] = self._metadata["run_id"]
+        self._set_session_run_stats()
+        if status != "interrupted":
+            self.session.metadata.pop("_pending_interrupt", None)
+            await self._save_checkpoint(kind="final")
+        data = dict(
+            content=content,
+            usage=dict(self._metadata["usage_total"]),
+            latency_ms=self._metadata["latency_ms"],
+            llm_calls=self._metadata["llm_calls"],
+            status=status,
+            termination_reason=termination_reason,
+            interrupt=interrupt,
+            usage_available=self._metadata.get("usage_available", True),
+            output=self._metadata.get("structured_output"),
+        )
+        yield self._event("done", data=dict(data))
+        yield self._event("run_end", data=dict(data))
 
-    def _iter_tool_feedback_chunks(self, tool_messages: list[Message]):
-        """把工具错误转换成流式 chunk，便于上层统一消费。"""
-        for tool_message in tool_messages:
-            error_message = self.tool_executor.extract_error_message(tool_message.content)
-            if error_message:
-                yield LLMResponseChunk(content=f"\n[工具执行错误] {error_message}\n")
+    async def _run_tool_phase(self, *, ctx, tool_calls):
+        # Batches only cross tools with no before/after hooks. Guards that depend on a
+        # previous result must run after that result, not before an entire batch.
+        can_batch = (
+            not self._metadata.get("batch_results")
+            and self.session.parallel_tool_calls
+            and not self.middleware._before_tool_mws
+            and not self.middleware._after_tool_mws
+            and len(tool_calls) > 1
+        )
+        if can_batch:
+            for tc in tool_calls:
+                yield self._tool_start_event(tc)
+            for tc in tool_calls:
+                self._metadata["tool_states"][tc.id] = "running"
+            await self._save_checkpoint(kind="tool_running", pending=tool_calls)
+            results = await self.tool_executor.execute(tool_calls, concurrent=True)
+            self._metadata["batch_results"] = {
+                tc.id: msg.model_dump(mode="json") for tc, msg in zip(tool_calls, results)
+            }
+            await self._save_checkpoint(kind="tool_result", pending=tool_calls)
+            for index, (tc, msg) in enumerate(zip(tool_calls, results)):
+                final = await self._commit_tool(ctx, tc, msg, tool_calls[index + 1 :])
+                yield self._tool_end_event(tc, final)
+            return
+        for index, tc in enumerate(tool_calls):
+            remaining = tool_calls[index:]
+            cached = self._metadata.get("batch_results", {}).get(tc.id)
+            if cached is not None:
+                final = await self._commit_tool(
+                    ctx, tc, Message.model_validate(cached), tool_calls[index + 1 :]
+                )
+                yield self._tool_end_event(tc, final)
+                continue
+            self._metadata["tool_states"][tc.id] = "preparing"
+            await self._save_checkpoint(kind="tool_running", pending=remaining)
+            try:
+                result = await self._in_context(ctx, self.middleware.execute_before_tool, ctx, tc)
+            except InterruptSignal as sig:
+                remaining[0] = sig.tool_call
+                tool_calls[index] = sig.tool_call
+                self._record_final_call(sig.tool_call)
+                sig.pending = remaining
+                raise
+            if result is None:
+                result = ToolMessage(
+                    content=json.dumps(
+                        {
+                            "ok": False,
+                            "error": {"type": "tool_skipped", "message": "工具被中间件跳过"},
+                        }
+                    ),
+                    tool_call_id=tc.id,
+                    name=tc.function.name,
+                    status="error",
+                )
+            if getattr(result, "role", None) != "tool":
+                tc = result
+                self._record_final_call(tc)
+            yield self._tool_start_event(tc)
+            if getattr(result, "role", None) != "tool":
+                self._metadata["tool_states"][tc.id] = "running"
+                await self._save_checkpoint(kind="tool_running", pending=remaining)
 
-    async def _execute_one_tool_call(
-        self,
-        tool_call: ToolCall,
-        *,
-        step: int,
-        task: "Task | None" = None,
-        run_id: str | None = None,
-    ) -> Message:
-        tool = self.tool_executor.registry.get(tool_call.function.name)
-        await self._emit_event(
-            "tool_start",
-            step=step,
-            run_id=run_id,
+                async def nested(nested_tc):
+                    if self._metadata.get("unknown_tool"):
+                        raise RuntimeError(
+                            "An earlier tool outcome is unknown; further code tools are blocked"
+                        )
+                    # A code block cannot be replayed around an interrupt safely. Require
+                    # a direct model tool call for approval instead of pretending resumability.
+                    try:
+                        nested_result = await self._in_context(
+                            ctx, self.middleware.execute_before_tool, ctx, nested_tc
+                        )
+                    except InterruptSignal:
+                        return ToolMessage(
+                            content=json.dumps(
+                                {
+                                    "ok": False,
+                                    "error": {
+                                        "type": "direct_approval_required",
+                                        "message": "请直接调用该工具以取得独立审批；代码块不可安全重放",
+                                    },
+                                }
+                            ),
+                            tool_call_id=nested_tc.id,
+                            name=nested_tc.function.name,
+                            status="error",
+                        )
+                    if nested_result is None:
+                        return ToolMessage(
+                            content='{"ok": false, "error": {"message": "工具被跳过"}}',
+                            tool_call_id=nested_tc.id,
+                            name=nested_tc.function.name,
+                            status="error",
+                        )
+                    if getattr(nested_result, "role", None) != "tool":
+                        nested_result = await self.tool_executor.execute_one(nested_result)
+                    nested_result = self._to_core_tool_message(nested_result, nested_tc)
+                    try:
+                        unknown = json.loads(nested_result.content).get("status") == "unknown"
+                    except (ValueError, AttributeError):
+                        unknown = False
+                    if unknown:
+                        self._metadata["unknown_tool"] = True
+                        raise RuntimeError("Nested tool outcome is unknown; reconcile before retry")
+                    get_or_create_log(self.session).append(
+                        run_id=self._metadata["run_id"],
+                        agent=self.session.session_id,
+                        step=self._metadata["step_index"],
+                        kind="tool",
+                        summary="nested " + nested_tc.function.name,
+                        data={
+                            "tool": nested_tc.function.name,
+                            "arguments": nested_tc.function.arguments,
+                            "nested": True,
+                        },
+                    )
+                    return await self._in_context(
+                        ctx, self.middleware.execute_after_tool, ctx, nested_result
+                    )
+
+                with bind_tool_execution(nested):
+                    result = await self._in_context(ctx, self.tool_executor.execute_one, tc)
+            final = await self._commit_tool(ctx, tc, result, tool_calls[index + 1 :])
+            yield self._tool_end_event(tc, final)
+            if self._metadata.get("unknown_tool"):
+                return
+
+    async def _commit_tool(self, ctx, tc, msg, remaining):
+        final = self._to_core_tool_message(msg, tc)
+        final = await self._in_context(ctx, self.middleware.execute_after_tool, ctx, final)
+        final = self._to_core_tool_message(final, tc)
+        self.session.context.get_messages().append(final)
+        unknown = (
+            final.metadata.get("status") == "unknown" or '"status": "unknown"' in final.content
+        )
+        self._metadata["tool_states"][tc.id] = "unknown" if unknown else final.status
+        if unknown:
+            self._metadata["unknown_tool"] = True
+        self._metadata["approval_decisions"].pop(tc.id, None)
+        self._metadata.get("batch_results", {}).pop(tc.id, None)
+        get_or_create_log(self.session).append(
+            run_id=self._metadata["run_id"],
+            agent=self.session.session_id,
+            step=self._metadata["step_index"],
+            kind="tool",
+            summary=f"{tc.function.name} -> {final.content[:200]}",
             data={
-                "tool_name": tool_call.function.name,
+                "tool": tc.function.name,
+                "arguments": tc.function.arguments,
+                "status": self._metadata["tool_states"][tc.id],
+            },
+        )
+        await self._save_checkpoint(kind="tool_result", pending=remaining)
+        return final
+
+    def _record_final_call(self, tc):
+        for message in reversed(self.session.context.get_messages()):
+            if message.role == "assistant" and message.tool_calls:
+                message.tool_calls = [
+                    tc if original.id == tc.id else original for original in message.tool_calls
+                ]
+                break
+
+    def _block_uncertain_tools(self):
+        cached = self._metadata.get("batch_results", {})
+        for call_id, state in self._metadata.get("tool_states", {}).items():
+            if state in ("running", "preparing") and call_id not in cached:
+                self._metadata["tool_states"][call_id] = "unknown"
+                self.session.metadata["_blocked_run"] = self._metadata.get("run_id")
+                self._metadata["unknown_tool"] = True
+                parent = self._parent
+                while parent is not None:
+                    parent.metadata["unknown_tool"] = True
+                    parent_session = parent.config.get("session")
+                    if parent_session is not None:
+                        parent_session.metadata["_blocked_run"] = parent.metadata.get("run_id")
+                    parent = parent.config.get("parent_context")
+
+    @staticmethod
+    def _to_core_tool_message(msg, tc):
+        if isinstance(msg, ToolMessage):
+            return msg
+        content = getattr(msg, "content", "") or ""
+        status = (
+            "error"
+            if ('"ok": false' in content.lower() or '"ok":false' in content.lower())
+            else "success"
+        )
+        return ToolMessage(
+            content=content,
+            tool_call_id=getattr(msg, "tool_call_id", None) or tc.id,
+            name=getattr(msg, "name", None) or tc.function.name,
+            status=status,
+            metadata=getattr(msg, "metadata", {}) or {},
+        )
+
+    def _tool_start_event(self, tc):
+        tool = self.tool_executor.registry.get(tc.function.name)
+        return self._event(
+            "tool_start",
+            data={
+                "tool_name": tc.function.name,
+                "tool_call_id": tc.id,
+                "args": tc.function.arguments,
                 "display_name": tool.display_name if tool else None,
-                "args": tool_call.function.arguments,
-                "tool_call_id": tool_call.id,
                 "side_effect": bool(tool and tool.execution.side_effect),
                 "requires_approval": bool(tool and tool.execution.requires_approval),
             },
         )
-        try:
-            tool_message = await self.tool_executor.execute_one(tool_call)
-        except Exception as exc:
-            tool_message = Message(
-                role="tool",
-                content=f"工具执行失败: {exc}",
-                tool_call_id=tool_call.id,
-                name=tool_call.function.name,
-            )
 
-        await self._emit_event(
-            "tool_end",
-            step=step,
-            run_id=run_id,
+    def _tool_end_event(self, tc, msg):
+        return self._event(
+            "tool_error" if msg.status == "error" else "tool_end",
             data={
-                "tool_name": tool_call.function.name,
-                "tool_call_id": tool_call.id,
-                "output": tool_message.content,
+                "tool_name": tc.function.name,
+                "tool_call_id": tc.id,
+                "output": msg.content,
+                "status": msg.status,
             },
         )
-        return tool_message
 
-    async def _execute_tool_calls(
-        self,
-        tool_calls: list[ToolCall],
-        *,
-        step: int,
-        task: "Task | None" = None,
-        run_id: str | None = None,
-    ) -> list[Message]:
-        """执行所有工具调用（不使用中间件）"""
-        tool_messages = []
-        for tool_call in tool_calls:
-            tool_message = await self._execute_one_tool_call(
-                tool_call,
-                step=step,
-                task=task,
-                run_id=run_id,
-            )
-            tool_messages.append(tool_message)
-        return tool_messages
+    def _copy_messages(self):
+        return [m.model_copy(deep=True) for m in self.session.context.get_messages()]
 
-    async def _execute_tool_calls_with_middleware(
-        self,
-        tool_calls: list[ToolCall],
-        *,
-        ctx: MiddlewareContext,
-        step: int,
-        task: "Task | None" = None,
-        run_id: str | None = None,
-    ) -> list[Message]:
-        """执行所有工具调用（使用完整中间件生命周期）
+    def _set_session_run_stats(self):
+        self.session.last_usage = dict(self._metadata["usage_total"])
+        self.session.last_latency_ms = self._metadata["latency_ms"]
+        self.session.last_llm_calls = self._metadata["llm_calls"]
 
-        每个工具调用经过：
-        before_tool → tool.execute() → after_tool
-        """
-        from wuwei.core.message import ToolMessage as TMsg
-
-        tool_messages = []
-        for tool_call in tool_calls:
-            # --- before_tool 中间件 ---
-            modified_call = await self.middleware.execute_before_tool(ctx, tool_call)
-            if modified_call is None:
-                # 中间件拦截了工具调用
-                continue
-
-            # 执行工具
-            tool_message = await self._execute_one_tool_call(
-                modified_call,
-                step=step,
-                task=task,
-                run_id=run_id,
-            )
-
-            # --- after_tool 中间件 ---
-            tool_msg = TMsg(
-                content=tool_message.content or "",
-                tool_call_id=tool_message.tool_call_id or "",
-                name=tool_message.name or "",
-            )
-            modified_msg = await self.middleware.execute_after_tool(ctx, tool_msg)
-            tool_messages.append(
-                Message(
-                    role="tool",
-                    content=modified_msg.content or "",
-                    tool_call_id=modified_msg.tool_call_id,
-                    name=modified_msg.name,
-                )
-            )
-
-        return tool_messages
-
-    async def _run_non_stream(
-        self,
-        user_input: str,
-        task: "Task | None" = None,
-    ) -> AgentRunResult:
-        """非流式执行 — 委托给 StateGraph。
-
-        构建标准 agent 图，将 user_input 注入 State，
-        由 CompiledGraph.invoke() 驱动完整执行循环。
-        中间件生命周期在图的节点内部调用。
-        """
-        start_time = time.monotonic()
-        total_usage = self._empty_usage()
-        llm_calls = 0
-
-        # 从 session context 构建初始 State
-        self.session.context.add_user_message(user_input)
-        state = State(
-            messages=list(self._copy_messages()),
-            metadata={},
-            step=0,
+    def _event(self, event_type, *, data=None, **kwargs):
+        event = AgentEvent(
+            type=event_type,
+            session_id=self.session.session_id,
+            step=self._metadata.get("step_index", 0),
+            run_id=self._metadata.get("run_id"),
+            data=data or {},
         )
-
-        try:
-            graph = self._build_graph()
-            state = await graph.invoke(state)
-
-            # 统计 LLM 调用次数和 token
-            llm_calls = state.step + 1
-            usage = state.metadata.get("_last_usage", {})
-            self._merge_usage(total_usage, usage)
-
-            # 获取最终 AI 消息
-            last_ai = state.get_last_ai_message()
-            content = last_ai.content if last_ai else ""
-
-            # 同步 state 回 session context
-            self._sync_state_to_context(state)
-
-            latency_ms = int((time.monotonic() - start_time) * 1000)
-            return self._build_run_result(
-                content=content,
-                usage=total_usage,
-                latency_ms=latency_ms,
-                llm_calls=llm_calls,
-            )
-        except Exception as exc:
-            latency_ms = int((time.monotonic() - start_time) * 1000)
-            ctx = MiddlewareContext(state=None, config={}, step=llm_calls)
-            ctx.state = type('State', (), {'messages': [], 'metadata': {}})()
-            handled = await self.middleware.execute_on_error(ctx, exc)
-            if handled is not None:
-                raise
-            return self._build_run_result(
-                content=f"执行出错: {exc}",
-                usage=total_usage,
-                latency_ms=latency_ms,
-                llm_calls=llm_calls,
-            )
-
-    def _sync_state_to_context(self, state: State) -> None:
-        """将 State 中的消息同步回 session context。"""
-        from wuwei.core.message import AIMessage as AIMsg, ToolMessage as TMsg
-        existing_count = len(self.session.context.get_messages())
-        for i, msg in enumerate(state.messages):
-            if i < existing_count:
-                continue
-            self.session.context._messages.append(msg)
+        if self.event_bus is not None:
+            self.event_bus.publish_nowait(event)
+        return event

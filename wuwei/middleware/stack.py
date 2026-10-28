@@ -6,7 +6,8 @@
 - wrap_model_call：洋葱模式包装 LLM 调用
 """
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from wuwei.core.message import AIMessage, ToolCall, ToolMessage
 from wuwei.middleware.base import Middleware, MiddlewareContext
@@ -30,7 +31,7 @@ class MiddlewareStack:
         ctx = await stack.execute_before_llm(ctx)
     """
 
-    def __init__(self):
+    def __init__(self, *middlewares: Middleware):
         self.middlewares: list[Middleware] = []
         # 预分拣列表：只包含实现了对应钩子的中间件
         self._before_llm_mws: list[Middleware] = []
@@ -39,6 +40,8 @@ class MiddlewareStack:
         self._after_tool_mws: list[Middleware] = []
         self._on_error_mws: list[Middleware] = []
         self._wrap_model_call_mws: list[Middleware] = []
+        for middleware in middlewares:
+            self.add(middleware)
 
     def add(self, middleware: Middleware) -> "MiddlewareStack":
         """添加中间件并自动分拣
@@ -113,15 +116,32 @@ class MiddlewareStack:
         self,
         ctx: MiddlewareContext,
         tool_call: ToolCall,
-    ) -> Optional[ToolCall]:
+    ) -> ToolCall | ToolMessage | None:
         """执行所有 before_tool 中间件
 
         返回 None 表示中间件拦截了该工具调用。
         """
-        for mw in self._before_tool_mws:
+        # Dispatchers execute tools themselves, so authorization always precedes them.
+        ordered = sorted(
+            self._before_tool_mws,
+            key=lambda mw: (
+                2
+                if getattr(mw, "is_tool_handler", False)
+                else (1 if getattr(mw, "is_tool_guard", False) else 0)
+            ),
+        )
+        for mw in ordered:
             result = await mw.before_tool(ctx, tool_call)
-            if result is None:
-                return None
+            if result is None or isinstance(result, ToolMessage):
+                return result
+            if getattr(result, "role", None) == "tool":
+                return result
+            if not isinstance(result, ToolCall):
+                raise TypeError(
+                    f"{type(mw).__name__}.before_tool must return ToolCall/ToolMessage/None"
+                )
+            if result.id != tool_call.id:
+                raise ValueError("Middleware cannot rewrite tool_call_id")
             tool_call = result
         return tool_call
 
@@ -139,7 +159,7 @@ class MiddlewareStack:
         self,
         ctx: MiddlewareContext,
         error: Exception,
-    ) -> Optional[Exception]:
+    ) -> Exception | None:
         """执行错误处理中间件
 
         返回 None 表示错误已被处理。

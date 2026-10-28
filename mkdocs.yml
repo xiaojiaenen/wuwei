@@ -120,11 +120,8 @@ nav:
     - 架构总览: core/architecture.md
     - Agent: core/agent.md
     - Session: core/session.md
-    - PlanAgent: core/plan-agent.md
-    - Hook 系统: core/hooks.md
   - 工具系统:
     - 概览: tools/overview.md
-    - 内置工具: tools/builtin.md
     - 自定义工具: tools/custom.md
   - 记忆与上下文:
     - Context: memory/context.md
@@ -139,10 +136,19 @@ nav:
     - 编写技能: skill/authoring.md
   - 人工审批:
     - HITL: hitl/overview.md
+  - 插件: plugin.md
+  - 工具治理与代码执行: governance.md
+  - 协议与部署: protocols.md
+  - 存储与运维: operations.md
   - API 参考:
     - 模块索引: api/reference.md
   - 示例:
+    - 离线可执行示例: examples/offline.md
     - 最小示例: examples/minimal.md
     - 会话示例: examples/session.md
-    - 规划示例: examples/plan-agent.md
   - 更新日志: changelog.md
+
+# Internal audit evidence is versioned, not part of the published user manual.
+exclude_docs: |
+  /audits/**
+  /superpowers/**

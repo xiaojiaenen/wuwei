@@ -1,8 +1,8 @@
 """状态定义"""
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
-from wuwei.core.message import BaseMessage, AIMessage, HumanMessage
+
+from wuwei.core.message import AIMessage, BaseMessage, HumanMessage
 
 
 @dataclass
@@ -20,18 +20,18 @@ class State:
         """添加消息"""
         self.messages.append(message)
 
-    def get_last_message(self) -> Optional[BaseMessage]:
+    def get_last_message(self) -> BaseMessage | None:
         """获取最后一条消息"""
         return self.messages[-1] if self.messages else None
 
-    def get_last_ai_message(self) -> Optional[AIMessage]:
+    def get_last_ai_message(self) -> AIMessage | None:
         """获取最后一条 AI 消息"""
         for msg in reversed(self.messages):
             if isinstance(msg, AIMessage):
                 return msg
         return None
 
-    def get_last_user_message(self) -> Optional[HumanMessage]:
+    def get_last_user_message(self) -> HumanMessage | None:
         """获取最后一条用户消息"""
         for msg in reversed(self.messages):
             if isinstance(msg, HumanMessage):
@@ -44,7 +44,6 @@ class State:
 
     def to_dict(self) -> dict:
         """转换为字典（JSON 可序列化）"""
-        import json
         from datetime import datetime
 
         def _serialize_value(obj):
@@ -83,6 +82,9 @@ class State:
             elif role == "assistant":
                 messages.append(AIMessage(**msg_data))
             elif role == "tool":
+                # 容忍历史数据中 name/status 缺失
+                msg_data.setdefault("name", "")
+                msg_data.setdefault("status", "success")
                 messages.append(ToolMessage(**msg_data))
 
         return cls(

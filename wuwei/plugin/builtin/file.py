@@ -1,8 +1,7 @@
 """File 工具插件 — workspace 内文件操作"""
 
+import json
 from pathlib import Path
-
-from markitdown import MarkItDown
 
 from wuwei.plugin import PluginContext
 
@@ -92,6 +91,16 @@ def setup(ctx: PluginContext) -> None:
     )
     def file_to_md(path: str):
         try:
+            try:
+                from markitdown import MarkItDown
+            except ImportError:
+                return json.dumps({
+                    "ok": False,
+                    "error": {
+                        "type": "MissingDependency",
+                        "message": "file_to_md 需要 markitdown：pip install 'wuwei[markitdown]' 或 pip install markitdown",
+                    },
+                }, ensure_ascii=False)
             md_converter = MarkItDown()
             result = md_converter.convert(path)
         except Exception as e:

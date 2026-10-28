@@ -2,6 +2,7 @@
 
 import json
 from typing import Any
+
 from wuwei.parsers.base import BaseOutputParser
 
 

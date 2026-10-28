@@ -187,8 +187,11 @@ class TestHitlMiddleware:
             function=FunctionCall(name="dangerous_tool", arguments={}),
         )
 
-        with pytest.raises(ToolApprovalRejected):
-            await mw.before_tool(ctx, tool_call)
+        result = await mw.before_tool(ctx, tool_call)
+        # v3.1 新语义：拒绝回喂 ToolMessage
+        from wuwei.core.message import ToolMessage as RejectedMsg
+        assert isinstance(result, RejectedMsg)
+        assert '"approval_rejected"' in result.content
 
     @pytest.mark.asyncio
     async def test_user_approval(self):
@@ -223,5 +226,8 @@ class TestHitlMiddleware:
             function=FunctionCall(name="test_tool", arguments={}),
         )
 
-        with pytest.raises(ToolApprovalRejected):
-            await mw.before_tool(ctx, tool_call)
+        result = await mw.before_tool(ctx, tool_call)
+        # v3.1 新语义：拒绝回喂 ToolMessage
+        from wuwei.core.message import ToolMessage as RejectedMsg
+        assert isinstance(result, RejectedMsg)
+        assert '"approval_rejected"' in result.content

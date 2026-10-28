@@ -182,7 +182,7 @@ class PluginManager:
             return None
 
         try:
-            with open(yaml_file, "r", encoding="utf-8") as f:
+            with open(yaml_file, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
         except Exception:
             _logger.exception("解析 %s 失败", yaml_file)

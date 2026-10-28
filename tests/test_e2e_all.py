@@ -22,93 +22,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # ═══════════════════════════════════════════════════════════════════
 
 
-def test_channels():
-    """测试所有通道类型的 CRUD + 序列化"""
-    from wuwei.graph.channels import (
-        LastValue, Topic, Aggregate, EphemeralValue,
-        EmptyChannelError, InvalidUpdateError,
-    )
-
-    # --- LastValue ---
-    lv = LastValue(int)
-    lv.update(42)
-    assert lv.get() == 42
-    assert lv.checkpoint() == 42
-
-    # 多写检测
-    try:
-        lv.update(99)  # 同一步内写入不同值
-        assert False, "应该抛出 InvalidUpdateError"
-    except InvalidUpdateError:
-        pass  # 正确
-
-    # 从检查点恢复
-    lv2 = LastValue(int)
-    lv2.from_checkpoint(100)
-    assert lv2.get() == 100
-
-    # 空通道抛异常
-    lv3 = LastValue(int)
-    try:
-        lv3.get()
-        assert False, "应该抛出 EmptyChannelError"
-    except EmptyChannelError:
-        pass
-
-    # --- EphemeralValue ---
-    ev = EphemeralValue(str)
-    ev.update("route_to_tools")
-    assert ev.get() == "route_to_tools"
-    # 空列表清除
-    ev.update([])
-    try:
-        ev.get()
-        assert False
-    except EmptyChannelError:
-        pass
-
-    # --- Topic (accumulate) ---
-    tp = Topic(str, accumulate=True)
-    tp.update("a")
-    tp.update(["b", "c"])
-    assert tp.get() == ["a", "b", "c"]
-    # 累积模式不清空
-    assert tp.get() == ["a", "b", "c"]
-    # 检查点
-    assert tp.checkpoint() == ["a", "b", "c"]
-    tp.from_checkpoint(["x"])
-    assert tp.get() == ["x"]
-
-    # --- Topic (non-accumulate / pub-sub) ---
-    tp2 = Topic(str, accumulate=False)
-    tp2.update("e1")
-    tp2.update("e2")
-    assert tp2.get() == ["e1", "e2"]
-    assert tp2.get() == []  # 已清空
-
-    # --- Aggregate ---
-    agg = Aggregate(lambda a, b: a + b, initial_value=0)
-    agg.update(1)
-    agg.update(2)
-    agg.update(3)
-    assert agg.get() == 6
-    assert agg.checkpoint() == 6
-    agg.from_checkpoint(10)
-    assert agg.get() == 10
-
-    # 列表合并模式
-    agg2 = Aggregate(lambda a, b: a + b, initial_value=[])
-    agg2.update([1, 2])
-    agg2.update([3, 4])
-    assert agg2.get() == [1, 2, 3, 4]
-
-    print("  ✅ Channels: LastValue + EphemeralValue + Topic + Aggregate 全部通过")
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Test 2: Checkpoint System（检查点系统）
-# ═══════════════════════════════════════════════════════════════════
-
 
 async def test_checkpoints():
     """测试内存和 SQLite 检查点的保存/恢复/列表"""
@@ -169,11 +82,6 @@ async def test_checkpoints():
         assert len(cps2) >= 1
 
     print("  ✅ Checkpoints: MemoryCheckpointer + SQLiteCheckpointer 全部通过")
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Test 3: StateGraph + CompiledGraph（状态图）
-# ═══════════════════════════════════════════════════════════════════
 
 
 async def test_state_graph():
@@ -471,8 +379,16 @@ async def test_middleware_stack():
     assert result == tc2  # 批准通过
 
     hitl2 = HitlMiddleware(approval_provider=always_reject)
+    rejection = await hitl2.before_tool(ctx, tc2)
+    # v3.1 新语义：拒绝不再抛异常，而是回喂结构化错误的 ToolMessage
+    assert isinstance(rejection, ToolMessage)
+    assert '"approval_rejected"' in rejection.content
+    assert rejection.tool_call_id == tc2.id
+
+    # raise_on_reject=True 时保留旧的异常语义
+    hitl3 = HitlMiddleware(approval_provider=always_reject, raise_on_reject=True)
     try:
-        await hitl2.before_tool(ctx, tc2)
+        await hitl3.before_tool(ctx, tc2)
         assert False, "应该抛出 ToolApprovalRejected"
     except ToolApprovalRejected:
         pass
@@ -1190,7 +1106,7 @@ async def main():
     print()
 
     tests = [
-        ("Channels", test_channels),
+        ("Checkpoints", test_checkpoints),
         ("Checkpoints", test_checkpoints),
         ("StateGraph", test_state_graph),
         ("Graph Streaming", test_graph_streaming),
@@ -1208,7 +1124,7 @@ async def main():
         ("Builtin Tools", test_builtin_tools),
         ("Config", test_config),
         ("Event System", test_event_system),
-        ("Swarm", test_swarm),
+        ("MultiAgentGraph", test_swarm),
         ("Plugin System", test_plugin_system),
         ("MCP Client", test_mcp_imports),
         ("Gateway System", test_gateway_imports),

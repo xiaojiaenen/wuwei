@@ -1,10 +1,9 @@
 """日志中间件"""
 
 import logging
-from typing import Optional
-from wuwei.middleware.base import Middleware, MiddlewareContext
-from wuwei.core.message import AIMessage, ToolCall, ToolMessage
 
+from wuwei.core.message import AIMessage, ToolCall, ToolMessage
+from wuwei.middleware.base import Middleware, MiddlewareContext
 
 logger = logging.getLogger("wuwei.middleware")
 
@@ -58,9 +57,9 @@ class LoggingMiddleware(Middleware):
         tool_message: ToolMessage,
     ) -> ToolMessage:
         """记录工具执行后"""
+        status = getattr(tool_message, "status", None) or "unknown"
         logger.log(
             self.log_level,
-            f"[Step {ctx.step}] 工具结果: {tool_message.name} "
-            f"({tool_message.status})",
+            f"[Step {ctx.step}] 工具结果: {tool_message.name} ({status})",
         )
         return tool_message

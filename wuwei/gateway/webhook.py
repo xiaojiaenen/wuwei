@@ -1,8 +1,9 @@
 """通用 Webhook 网关"""
 
-import json
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
+
 from wuwei.gateway.base import BaseGateway, GatewayMessage
 
 
@@ -37,8 +38,8 @@ class WebhookGateway(BaseGateway):
     async def start(self):
         """启动 Webhook 服务器"""
         try:
-            from fastapi import FastAPI, Request
             import uvicorn
+            from fastapi import FastAPI, Request
         except ImportError:
             raise ImportError(
                 "使用 Webhook 网关需要安装 fastapi 和 uvicorn：\n"

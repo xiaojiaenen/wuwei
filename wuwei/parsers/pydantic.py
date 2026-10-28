@@ -1,8 +1,10 @@
 """Pydantic 输出解析器"""
 
 import json
-from typing import Any, Type
+from typing import Any
+
 from pydantic import BaseModel, ValidationError
+
 from wuwei.parsers.base import BaseOutputParser
 from wuwei.parsers.json import JsonOutputParser
 
@@ -25,7 +27,7 @@ class PydanticOutputParser(BaseOutputParser):
         # result = User(name="test", age=25)
     """
 
-    def __init__(self, schema: Type[BaseModel]):
+    def __init__(self, schema: type[BaseModel]):
         """
         Args:
             schema: Pydantic 模型类

@@ -1,8 +1,9 @@
 """微信网关"""
 
-import json
-from typing import Any, Callable
-from wuwei.gateway.base import BaseGateway, GatewayMessage
+from collections.abc import Callable
+from typing import Any
+
+from wuwei.gateway.base import BaseGateway
 
 
 class WeChatGateway(BaseGateway):

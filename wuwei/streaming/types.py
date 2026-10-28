@@ -1,8 +1,8 @@
 """流式模式类型定义"""
 
-from typing import Literal, Any
-from pydantic import BaseModel, Field
+from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, Field
 
 # 流式模式类型
 StreamMode = Literal[
@@ -21,8 +21,7 @@ class StreamChunk(BaseModel):
     data: Any = None  # 数据内容
     metadata: dict = Field(default_factory=dict)  # 元数据
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ValuesStreamChunk(StreamChunk):

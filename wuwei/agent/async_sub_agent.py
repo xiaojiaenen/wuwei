@@ -23,15 +23,13 @@ import asyncio
 import json
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from wuwei.core.message import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from wuwei.llm.types import Message
-from wuwei.graph.graph import END, CompiledGraph, StateGraph
-from wuwei.graph.state import State
+from wuwei.core.message import ToolMessage
 from wuwei.middleware.base import Middleware, MiddlewareContext
-from wuwei.tools import Tool, ToolRegistry, ToolExecutor
+from wuwei.tools import Tool
 
 
 @dataclass
@@ -66,6 +64,7 @@ class AsyncSubAgent:
 @dataclass
 class AsyncTaskHandle:
     """异步任务句柄 — 追踪后台子代理执行状态"""
+
     task_id: str
     sub_agent_name: str
     status: str = "pending"  # pending | running | completed | failed | cancelled
@@ -76,6 +75,11 @@ class AsyncTaskHandle:
     completed_at: float | None = None
     elapsed_ms: int = 0
     steps: int = 0
+    usage: dict = field(default_factory=dict)
+    llm_calls: int = 0
+    interrupt: dict | None = None
+    reconciliation: dict | None = None
+    owner_session: str | None = None
     _task: asyncio.Task | None = field(default=None, repr=False)
 
 
@@ -92,6 +96,8 @@ class AsyncSubAgentMiddleware(Middleware):
     使用 before_tool 拦截工具调用。
     """
 
+    is_tool_handler = True
+
     def __init__(
         self,
         sub_agents: list[AsyncSubAgent],
@@ -105,22 +111,41 @@ class AsyncSubAgentMiddleware(Middleware):
 
     def get_task_tools(self) -> list[dict]:
         """获取异步子代理工具 schema"""
-        sub_descs = "\n".join(
-            f"- {sa.name}: {sa.description}"
-            for sa in self.sub_agents.values()
-        )
+        sub_descs = "\n".join(f"- {sa.name}: {sa.description}" for sa in self.sub_agents.values())
         return [
             {
                 "type": "function",
                 "function": {
+                    "name": "resume_async_task",
+                    "description": "Resume an interrupted task with an approval decision.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string"},
+                            "approved": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["task_id", "approved"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "start_async_task",
-                    "description": f"Start a background sub-agent task. Available agents:\n{sub_descs}\nReturns a task_id for later checking.",
+                    "description": (
+                        f"Start a background sub-agent task. Available agents:\n{sub_descs}"
+                        "\nReturns a task_id for later checking."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "agent_name": {
                                 "type": "string",
-                                "description": f"Name of the sub-agent to use. One of: {list(self.sub_agents.keys())}",
+                                "description": (
+                                    "Name of the sub-agent to use. One of: "
+                                    f"{list(self.sub_agents.keys())}"
+                                ),
                                 "enum": list(self.sub_agents.keys()),
                             },
                             "task": {
@@ -136,7 +161,9 @@ class AsyncSubAgentMiddleware(Middleware):
                 "type": "function",
                 "function": {
                     "name": "check_async_task",
-                    "description": "Check the status/result of a background task. If completed, returns the result.",
+                    "description": (
+                        "Check background task status. Completed tasks include the result."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -195,33 +222,31 @@ class AsyncSubAgentMiddleware(Middleware):
         """拦截异步子代理工具调用"""
         tool_name = (
             tool_call.function.name
-            if hasattr(tool_call, 'function')
-            else getattr(tool_call, 'name', '')
+            if hasattr(tool_call, "function")
+            else getattr(tool_call, "name", "")
         )
 
-        if not tool_name.endswith("_async_task"):
+        if tool_name not in {
+            "resume_async_task",
+            "start_async_task",
+            "check_async_task",
+            "cancel_async_task",
+            "list_async_tasks",
+        }:
             return tool_call  # 不是子代理工具，放行
 
-        tc_id = (
-            tool_call.id
-            if hasattr(tool_call, 'id')
-            else getattr(tool_call, 'tool_call_id', '')
-        )
-        args = (
-            tool_call.function.arguments
-            if hasattr(tool_call, 'function')
-            else {}
-        )
+        tc_id = tool_call.id if hasattr(tool_call, "id") else getattr(tool_call, "tool_call_id", "")
+        args = tool_call.function.arguments if hasattr(tool_call, "function") else {}
 
         result_msg = await self._handle_async_tool(tool_name, args, ctx, tc_id)
 
-        # 将结果写入 state
-        if hasattr(ctx.state, 'add_message'):
-            ctx.state.add_message(result_msg)
-        elif hasattr(ctx.state, 'messages'):
-            ctx.state.messages.append(result_msg)
+        return result_msg
 
-        return None  # 拦截，跳过默认工具执行
+    @staticmethod
+    def _owner_session(ctx: MiddlewareContext):
+        return ctx.metadata.get("session_id") or getattr(ctx.state, "metadata", {}).get(
+            "session_id"
+        )
 
     async def _handle_async_tool(
         self,
@@ -237,12 +262,33 @@ class AsyncSubAgentMiddleware(Middleware):
                 args.get("task", ""),
                 ctx,
             )
+        elif tool_name in {"check_async_task", "cancel_async_task", "resume_async_task"} and (
+            args.get("task_id") in self._tasks
+            and self._tasks[args["task_id"]].owner_session != self._owner_session(ctx)
+        ):
+            result = json.dumps({"ok": False, "error": "Task not found in this session"})
+        elif tool_name == "resume_async_task":
+            handle = self._tasks.get(args.get("task_id", ""))
+            if handle is None or handle.status != "interrupted" or not handle.interrupt:
+                result = json.dumps({"ok": False, "error": "Task is not interrupted"})
+            else:
+                ctx.metadata["continuation_decision"] = {
+                    "approved": args.get("approved", True),
+                    "reason": args.get("reason", ""),
+                }
+                result = await self._start_task(
+                    handle.sub_agent_name,
+                    "Resume task",
+                    ctx,
+                    resume=handle.interrupt,
+                    task_id=handle.task_id,
+                )
         elif tool_name == "check_async_task":
             result = await self._check_task(args.get("task_id", ""))
         elif tool_name == "cancel_async_task":
             result = await self._cancel_task(args.get("task_id", ""))
         elif tool_name == "list_async_tasks":
-            result = self._list_tasks()
+            result = self._list_tasks(self._owner_session(ctx))
         else:
             result = json.dumps({"ok": False, "error": f"Unknown tool: {tool_name}"})
 
@@ -257,52 +303,90 @@ class AsyncSubAgentMiddleware(Middleware):
         agent_name: str,
         task: str,
         ctx: MiddlewareContext,
+        *,
+        resume=None,
+        task_id=None,
     ) -> str:
         """启动异步子代理任务"""
         sub = self.sub_agents.get(agent_name)
         if not sub:
             return json.dumps({"ok": False, "error": f"Unknown agent: {agent_name}"})
 
-        task_id = f"async_{uuid.uuid4().hex[:12]}"
+        task_id = task_id or f"async_{uuid.uuid4().hex[:12]}"
         handle = AsyncTaskHandle(
             task_id=task_id,
             sub_agent_name=agent_name,
             status="running",
             started_at=time.time(),
+            owner_session=self._owner_session(ctx),
         )
+
+        if not task.strip():
+            return json.dumps({"ok": False, "error": "Missing task"})
 
         # 提取父代理上下文
         parent_context = []
-        if sub.inherit_context and hasattr(ctx.state, 'messages'):
+        if sub.inherit_context and hasattr(ctx.state, "messages"):
             parent_context = list(ctx.state.messages)
 
         # 创建后台任务
         async def _run_sub_agent():
             try:
                 llm = sub.model or self.parent_llm
-                result = await self._execute_sub_agent(sub, task, llm, parent_context)
-                handle.result = result
-                handle.status = "completed"
+                result = await self._execute_sub_agent(
+                    sub, task, llm, parent_context, ctx=ctx, resume=resume
+                )
+                payload = json.loads(result)
+                handle.result = payload.get("result")
+                handle.status = payload.get("status", "unknown")
+                handle.usage = payload.get("usage", {})
+                handle.llm_calls = payload.get("llm_calls", 0)
+                handle.interrupt = payload.get("interrupt")
+                handle.reconciliation = payload.get("reconciliation")
+                handle.steps = payload.get("steps", 0)
                 handle.completed_at = time.time()
                 handle.elapsed_ms = int((handle.completed_at - handle.started_at) * 1000)
-            except asyncio.CancelledError:
-                handle.status = "cancelled"
-                handle.error = "Task cancelled"
+            except asyncio.CancelledError as exc:
+                handle.usage = getattr(exc, "child_usage", {})
+                handle.llm_calls = getattr(exc, "child_llm_calls", 0)
+                handle.reconciliation = getattr(exc, "child_unknown", None)
+                handle.status = "unknown" if handle.reconciliation else "cancelled"
+                handle.error = (
+                    "Tool outcome requires reconciliation"
+                    if handle.reconciliation
+                    else "Task cancelled"
+                )
             except Exception as e:
-                handle.status = "failed"
+                handle.reconciliation = getattr(e, "child_unknown", None)
+                handle.status = "unknown" if handle.reconciliation else "failed"
                 handle.error = str(e)
+                handle.usage = getattr(e, "child_usage", {})
+                handle.llm_calls = getattr(e, "child_llm_calls", 0)
                 handle.completed_at = time.time()
+            finally:
+                handle.completed_at = time.time()
+                handle.elapsed_ms = int((handle.completed_at - handle.started_at) * 1000)
 
-        handle._task = asyncio.create_task(_run_sub_agent())
+        import contextvars
+
+        from wuwei.runtime.context import current_context
+
+        background_context = contextvars.copy_context()
+        background_context.run(current_context.set, ctx)
+        handle._task = asyncio.create_task(_run_sub_agent(), context=background_context)
+        ctx.metadata.setdefault("background_tasks", []).append(handle._task)
         self._tasks[task_id] = handle
 
-        return json.dumps({
-            "ok": True,
-            "task_id": task_id,
-            "agent_name": agent_name,
-            "status": "running",
-            "message": f"Task started. Use check_async_task('{task_id}') to get results.",
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "ok": True,
+                "task_id": task_id,
+                "agent_name": agent_name,
+                "status": "running",
+                "message": f"Task started. Use check_async_task('{task_id}') to get results.",
+            },
+            ensure_ascii=False,
+        )
 
     async def _check_task(self, task_id: str) -> str:
         """查询异步任务状态"""
@@ -310,36 +394,26 @@ class AsyncSubAgentMiddleware(Middleware):
         if not handle:
             return json.dumps({"ok": False, "error": f"Task not found: {task_id}"})
 
-        if handle.status == "running":
-            return json.dumps({
-                "ok": True,
-                "task_id": task_id,
-                "status": "running",
-                "elapsed_ms": int((time.time() - handle.started_at) * 1000) if handle.started_at else 0,
-                "message": "Task is still running. Check again later.",
-            }, ensure_ascii=False)
-        elif handle.status == "completed":
-            return json.dumps({
-                "ok": True,
-                "task_id": task_id,
-                "status": "completed",
-                "result": handle.result,
-                "elapsed_ms": handle.elapsed_ms,
-                "steps": handle.steps,
-            }, ensure_ascii=False)
-        elif handle.status == "failed":
-            return json.dumps({
-                "ok": False,
-                "task_id": task_id,
-                "status": "failed",
-                "error": handle.error,
-            }, ensure_ascii=False)
-        else:
-            return json.dumps({
-                "ok": True,
+        return json.dumps(
+            {
+                "ok": handle.status not in {"failed", "error", "cancelled", "unknown"},
                 "task_id": task_id,
                 "status": handle.status,
-            }, ensure_ascii=False)
+                "result": handle.result,
+                "error": handle.error,
+                "usage": handle.usage,
+                "llm_calls": handle.llm_calls,
+                "interrupt": handle.interrupt,
+                "reconciliation": handle.reconciliation,
+                "steps": handle.steps,
+                "elapsed_ms": (
+                    int((time.time() - handle.started_at) * 1000)
+                    if handle.status == "running"
+                    else handle.elapsed_ms
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     async def _cancel_task(self, task_id: str) -> str:
         """取消异步任务"""
@@ -348,28 +422,40 @@ class AsyncSubAgentMiddleware(Middleware):
             return json.dumps({"ok": False, "error": f"Task not found: {task_id}"})
 
         if handle.status != "running":
-            return json.dumps({"ok": False, "error": f"Task is not running (status: {handle.status})"})
+            return json.dumps(
+                {"ok": False, "error": f"Task is not running (status: {handle.status})"}
+            )
 
         if handle._task:
             handle._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await handle._task
-            except asyncio.CancelledError:
-                pass
 
-        handle.status = "cancelled"
-        return json.dumps({"ok": True, "task_id": task_id, "status": "cancelled"})
+        if handle.status != "unknown":
+            handle.status = "cancelled"
+        return json.dumps(
+            {
+                "ok": True,
+                "task_id": task_id,
+                "status": handle.status,
+                "reconciliation": handle.reconciliation,
+            }
+        )
 
-    def _list_tasks(self) -> str:
+    def _list_tasks(self, owner_session=None) -> str:
         """列出所有异步任务"""
         tasks = []
         for h in self._tasks.values():
-            tasks.append({
-                "task_id": h.task_id,
-                "agent_name": h.sub_agent_name,
-                "status": h.status,
-                "elapsed_ms": h.elapsed_ms,
-            })
+            if owner_session is not None and h.owner_session != owner_session:
+                continue
+            tasks.append(
+                {
+                    "task_id": h.task_id,
+                    "agent_name": h.sub_agent_name,
+                    "status": h.status,
+                    "elapsed_ms": h.elapsed_ms,
+                }
+            )
         return json.dumps({"ok": True, "tasks": tasks}, ensure_ascii=False)
 
     async def _execute_sub_agent(
@@ -378,101 +464,56 @@ class AsyncSubAgentMiddleware(Middleware):
         task: str,
         llm: Any,
         parent_context: list | None = None,
+        ctx: MiddlewareContext | None = None,
+        resume: dict | None = None,
     ) -> str:
-        """执行子代理（与 SubAgentMiddleware 类似但支持上下文继承）"""
-        from wuwei.middleware.stack import MiddlewareStack
+        """执行子代理
 
-        registry = ToolRegistry()
-        if sub_agent.tools:
-            for tool in sub_agent.tools:
-                registry.register(tool)
-        executor = ToolExecutor(registry)
+        v3.2 起复用 SubAgentMiddleware 的标准执行循环（消除两份
+        90% 重复的图构建代码），异步语义只体现在任务句柄层。
+        """
+        from wuwei.agent.sub_agent import SubAgent, SubAgentMiddleware
 
-        mw_stack = MiddlewareStack()
-        if sub_agent.middleware:
-            for mw in sub_agent.middleware:
-                mw_stack.add(mw)
-
-        all_tools = list(registry.list_tools())
-
-        # 构建消息：系统提示 + 父代理上下文 + 用户任务
-        messages = [SystemMessage(content=sub_agent.system_prompt)]
+        task_text = task
         if parent_context:
-            # 注入父代理上下文摘要
+            # 最近消息的硬截断预览（非摘要——避免二次 LLM 调用的延迟与成本）
             context_summary = self._summarize_context(parent_context)
             if context_summary:
-                messages.append(SystemMessage(
-                    content=f"[Parent agent context]\n{context_summary}\n[/Parent agent context]"
-                ))
-        messages.append(HumanMessage(content=task))
+                task_text = (
+                    f"{task}\n\n[Parent agent context]\n{context_summary}\n[/Parent agent context]"
+                )
 
-        start_time = time.monotonic()
-        state = State(messages=messages, metadata={}, step=0)
+        sync_sub = SubAgent(
+            name=sub_agent.name,
+            description=getattr(sub_agent, "description", ""),
+            system_prompt=sub_agent.system_prompt,
+            tools=list(sub_agent.tools) if sub_agent.tools else None,
+            model=sub_agent.model,
+            max_steps=sub_agent.max_steps,
+            middleware=list(sub_agent.middleware) if sub_agent.middleware else None,
+        )
+        bridge = SubAgentMiddleware(sub_agents=[sync_sub], parent_llm=llm)
+        if ctx is not None:
+            from wuwei.agent.sub_agent import inherit_middleware
 
-        # 构建子代理图
-        graph = StateGraph(State)
-        graph.set_max_steps(sub_agent.max_steps)
-
-        async def agent_node(s: State, config: dict | None = None) -> State:
-            msgs = [m for m in s.messages]
-            tools = list(all_tools)
-
-            mw_ctx = MiddlewareContext(state=s, config=config or {}, step=s.step)
-            mw_ctx = await mw_stack.execute_before_llm(mw_ctx)
-            if hasattr(mw_ctx.state, 'messages'):
-                msgs = mw_ctx.state.messages
-
-            response = await llm.generate(msgs, tools=tools)
-
-            ai_msg = AIMessage(
-                content=response.message.content or "",
-                tool_calls=response.message.tool_calls or [],
+            ctx = MiddlewareContext(
+                state=ctx.state,
+                metadata=ctx.metadata,
+                config={
+                    **ctx.config,
+                    "middleware": inherit_middleware(ctx.config.get("middleware"), exclude=self),
+                },
             )
-            mw_ctx = await mw_stack.execute_after_llm(mw_ctx, ai_msg)
-            s.add_message(ai_msg)
-            s.metadata["_has_tool_calls"] = bool(response.message.tool_calls)
-            s.metadata["_tool_calls"] = response.message.tool_calls or []
-            s.metadata["_last_content"] = response.message.content or ""
-            return s
-
-        async def tool_node(s: State, config: dict | None = None) -> State:
-            tool_calls = s.metadata.get("_tool_calls", [])
-            mw_ctx = MiddlewareContext(state=s, config=config or {}, step=s.step)
-
-            for tc in tool_calls:
-                modified = await mw_stack.execute_before_tool(mw_ctx, tc)
-                if modified is None:
-                    continue
-                try:
-                    msg = await executor.execute_one(modified)
-                except Exception as exc:
-                    msg = Message(role="tool", content=f"Error: {exc}", tool_call_id=modified.id, name=modified.function.name)
-                tool_msg = ToolMessage(content=msg.content or "", tool_call_id=msg.tool_call_id or modified.id, name=msg.name or modified.function.name)
-                modified_msg = await mw_stack.execute_after_tool(mw_ctx, tool_msg)
-                s.add_message(ToolMessage(role="tool", content=modified_msg.content or "", tool_call_id=modified_msg.tool_call_id, name=modified_msg.name))
-            return s
-
-        async def should_continue(s: State, config: dict | None = None) -> str:
-            return "continue" if s.metadata.get("_has_tool_calls") else "end"
-
-        graph.add_node("agent", agent_node)
-        graph.add_node("tools", tool_node)
-        graph.set_entry_point("agent")
-        graph.add_conditional_edges("agent", should_continue, {"continue": "tools", "end": END})
-        graph.add_edge("tools", "agent")
-
-        final_state = await graph.compile().invoke(state)
-        last_ai = final_state.get_last_ai_message()
-        return last_ai.content if last_ai else ""
+        return await bridge._run_sub_agent(sync_sub, task_text, llm, ctx=ctx, resume=resume)
 
     def _summarize_context(self, messages: list) -> str:
-        """将父代理上下文压缩为简短摘要"""
+        """将父代理上下文压缩为最近消息的截断预览（非 LLM 摘要）。"""
         if not messages:
             return ""
         parts = []
         for msg in messages[-6:]:  # 最近 6 条
-            role = getattr(msg, 'role', '')
-            content = getattr(msg, 'content', '') or ''
-            if content and role in ('user', 'assistant'):
+            role = getattr(msg, "role", "")
+            content = getattr(msg, "content", "") or ""
+            if content and role in ("user", "assistant"):
                 parts.append(f"[{role}]: {content[:200]}")
         return "\n".join(parts)

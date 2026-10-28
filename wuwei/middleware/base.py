@@ -1,8 +1,8 @@
 """中间件基类"""
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from wuwei.core.message import AIMessage, ToolCall, ToolMessage
 from wuwei.graph.state import State
@@ -14,6 +14,7 @@ class MiddlewareContext:
 
     在中间件栈中传递的数据容器。
     """
+
     state: State
     config: dict = field(default_factory=dict)
     step: int = 0
@@ -56,7 +57,7 @@ class Middleware(ABC):
         self,
         ctx: MiddlewareContext,
         tool_call: ToolCall,
-    ) -> ToolCall:
+    ) -> ToolCall | ToolMessage | None:
         """工具执行前
 
         可以修改工具参数、拦截执行等。
@@ -78,7 +79,7 @@ class Middleware(ABC):
         self,
         ctx: MiddlewareContext,
         error: Exception,
-    ) -> Optional[Exception]:
+    ) -> Exception | None:
         """错误处理
 
         返回 None 表示已处理，否则继续抛出。

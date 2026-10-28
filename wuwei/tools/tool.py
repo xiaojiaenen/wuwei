@@ -1,21 +1,20 @@
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from typing import get_type_hints
 
 
 class ToolParameters(BaseModel):
+    model_config = ConfigDict(extra="allow")
     type: str = "object"
     properties: dict[str, Any] = Field(default_factory=dict)
     required: list = Field(default_factory=list)
 
     def to_schema(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "properties": self.properties,
-            "required": self.required,
-        }
+        return self.model_dump(exclude_none=True)
 
 
 class ToolRetryPolicy(BaseModel):
@@ -27,6 +26,7 @@ class ToolRetryPolicy(BaseModel):
 
 
 class ToolExecutionPolicy(BaseModel):
+    capability: str | None = None
     timeout_seconds: float | None = None
     side_effect: bool = False
     requires_approval: bool = False
@@ -58,10 +58,24 @@ class Tool(BaseModel):
         }
 
     async def invoke(self, args: dict[str, Any] | None = None) -> Any:
-        args = args or {}
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            raise ValueError("Tool arguments must be an object")
+        # Validate the public JSON contract before any handler side effects.
+        from jsonschema import validate, ValidationError
+        try:
+            validate(args, self.parameters.to_schema())
+        except ValidationError as exc:
+            raise ValueError(f"Invalid tool arguments: {exc.message}") from exc
+        inspect.signature(self.handler).bind(**args)
+        hints = get_type_hints(self.handler)
+        for key, value in args.items():
+            if key in hints:
+                TypeAdapter(hints[key]).validate_python(value, strict=True)
         if inspect.iscoroutinefunction(self.handler):
             return await self.handler(**args)
-        result = self.handler(**args)
+        result = await asyncio.to_thread(self.handler, **args)
         if inspect.isawaitable(result):
             return await result
         return result

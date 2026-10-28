@@ -81,54 +81,17 @@ class ToolRegistry:
             if parameters:
                 tool_parameters = parameters
             else:
+                from pydantic import create_model
                 sig = inspect.signature(func)
-                properties = {}
-                required = []
-
-                # 获取类型注解
-                type_hints = get_type_hints(func)
-
-                for param_name, param in sig.parameters.items():
-                    # 跳过self参数
-                    if param_name == "self":
+                hints = get_type_hints(func)
+                fields = {}
+                for key, param in sig.parameters.items():
+                    if key == "self" or param.kind in (param.VAR_KEYWORD, param.VAR_POSITIONAL):
                         continue
-
-                    # 推断参数类型
-                    raw_type = type_hints.get(param_name, str)
-                    # 处理 Union 类型（如 str | None），取第一个非 NoneType 的类型
-                    if hasattr(raw_type, "__args__"):
-                        # typing.Union 或 types.UnionType (Python 3.10+ X | Y)
-                        args = [a for a in raw_type.__args__ if a is not type(None)]
-                        raw_type = args[0] if args else str
-                    param_type = getattr(raw_type, "__name__", "string")
-                    if param_type in ["int", "float", "complex"]:
-                        param_type = "number"
-                    elif param_type in {"bool"}:
-                        param_type = "boolean"
-                    elif param_type in ["list", "tuple"]:
-                        param_type = "array"
-                    elif param_type in ["dict"]:
-                        param_type = "object"
-                    else:
-                        param_type = "string"
-
-                    # 获取参数描述（从docstring中提取）
-                    param_description = f"参数 {param_name}"
-                    if func.__doc__:
-                        # 简单的docstring解析，提取参数描述
-                        for line in func.__doc__.split("\n"):
-                            line = line.strip()
-                            if line.startswith(f":param {param_name}:"):
-                                param_description = line.split(":", 2)[2].strip()
-                                break
-
-                    properties[param_name] = {"type": param_type, "description": param_description}
-
-                    # 非可选参数
-                    if param.default == inspect.Parameter.empty:
-                        required.append(param_name)
-
-                tool_parameters = ToolParameters(properties=properties, required=required)
+                    fields[key] = (hints.get(key, Any), ... if param.default is inspect.Parameter.empty else param.default)
+                schema = create_model(f"{tool_name}Arguments", **fields).model_json_schema()
+                schema.pop("title", None)
+                tool_parameters = ToolParameters.model_validate(schema)
             self.register(
                 Tool(
                     name=tool_name,

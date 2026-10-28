@@ -15,9 +15,18 @@ class Task(BaseModel):
         "completed",
         "failed",
         "blocked",
+        "interrupted",
+        "incomplete",
+        "unknown",
+        "cancelled",
     ] = Field(description="任务状态。")
     result: str | None = Field(default=None, description="任务执行结果。")
     error: str | None = Field(default=None, description="任务失败信息。")
+
+    interrupt: dict | None = None
+    session_id: str | None = None
+    usage: dict[str, int] = Field(default_factory=dict)
+    llm_calls: int = 0
 
 
 class TaskList(BaseModel):
@@ -30,6 +39,7 @@ class PlanRunResult(BaseModel):
     """一次 plan-and-execute 运行的汇总结果。"""
 
     tasks: list[Task] = Field(default_factory=list)
+    status: str = "completed"
     usage: dict[str, int] = Field(
         default_factory=lambda: {
             "prompt_tokens": 0,

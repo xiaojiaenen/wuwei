@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from wuwei.core.message import SystemMessage
+from wuwei.core.message import SystemMessage, ToolMessage
 from wuwei.middleware import Middleware, MiddlewareContext
 from wuwei.plugin import PluginContext
 
@@ -70,11 +70,20 @@ class SkillPromptMiddleware(Middleware):
     """技能提示注入中间件
 
     在 LLM 调用前将可用技能列表注入系统提示词。
+    v3.2：当激活的 skill 声明了 allowed_tools（agentskills.io 开放标准字段）
+    时，强制限制本次可用的工具——白名单外返回结构化拒绝（支持 `*` 通配尾缀）。
     """
+
+    # 技能管理与账本类工具不受 allowed_tools 限制
+    _ALWAYS_ALLOWED = frozenset({
+        "list_skills", "load_skill", "load_skill_reference", "run_skill_python_script",
+        "read_context", "pin_context", "list_context", "run_code",
+    })
 
     def __init__(self, skill_manager):
         self.skill_manager = skill_manager
         self._injected = False
+        self.active_allowed_tools: list[str] | None = None
 
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """LLM 调用前注入技能指引"""
@@ -100,6 +109,39 @@ class SkillPromptMiddleware(Middleware):
         self._injected = True
         return ctx
 
+    async def before_tool(self, ctx: MiddlewareContext, tool_call):
+        allowed = self.active_allowed_tools
+        if not allowed:
+            return tool_call
+        name = tool_call.function.name
+        if name in self._ALWAYS_ALLOWED:
+            return tool_call
+        for pattern in allowed:
+            if pattern.endswith("*") and name.startswith(pattern[:-1]):
+                return tool_call
+            if name == pattern:
+                return tool_call
+        import json as _json
+
+        return ToolMessage(
+            content=_json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "skill_tool_restricted",
+                        "message": (
+                            f"工具 {name} 不在当前技能的 allowed_tools 白名单内"
+                            f"（{', '.join(allowed)}）。请改用白名单内的工具。"
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            tool_call_id=tool_call.id,
+            name=name,
+            status="error",
+        )
+
 
 def setup(ctx: PluginContext) -> None:
     """注册技能工具和提示注入中间件"""
@@ -108,8 +150,10 @@ def setup(ctx: PluginContext) -> None:
         return
 
     # ── 注册中间件 ──────────────────────────────────────────────
+    skill_prompt_mw = None
     if ctx.middleware_stack is not None:
-        ctx.middleware_stack.add(SkillPromptMiddleware(skill_manager))
+        skill_prompt_mw = SkillPromptMiddleware(skill_manager)
+        ctx.middleware_stack.add(skill_prompt_mw)
 
     # ── 工具内部状态 ────────────────────────────────────────────
     loaded_skill_tokens: dict[str, str] = {}
@@ -155,6 +199,9 @@ def setup(ctx: PluginContext) -> None:
 
         load_token = uuid4().hex
         loaded_skill_tokens[load_token] = skill.name
+        # 激活技能的 allowed_tools 白名单（agentskills.io 字段）
+        if skill_prompt_mw is not None:
+            skill_prompt_mw.active_allowed_tools = list(skill.allowed_tools) or None
         return {
             "name": skill.name,
             "description": skill.description,

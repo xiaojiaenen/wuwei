@@ -1,9 +1,10 @@
 """MCP 配置管理"""
 
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
 import json
 import os
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class MCPServerConfig(BaseModel):
@@ -12,12 +13,12 @@ class MCPServerConfig(BaseModel):
     transport: Literal["stdio", "http", "sse"] = "stdio"
 
     # stdio 配置
-    command: Optional[str] = None
+    command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
 
     # http/sse 配置
-    url: Optional[str] = None
+    url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
     # 通用配置
@@ -56,7 +57,7 @@ class MCPConfig(BaseModel):
         return config
 
     @classmethod
-    def _get_config_path(cls, scope: str) -> Optional[str]:
+    def _get_config_path(cls, scope: str) -> str | None:
         """获取配置文件路径"""
         if scope == "project":
             return ".mcp.json"

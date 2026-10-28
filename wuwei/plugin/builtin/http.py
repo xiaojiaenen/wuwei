@@ -20,6 +20,7 @@ def setup(ctx: PluginContext) -> None:
         """
         try:
             import json
+
             from httpx import AsyncClient
 
             headers_dict = json.loads(headers) if headers else {}
@@ -47,6 +48,7 @@ def setup(ctx: PluginContext) -> None:
         """
         try:
             import json
+
             from httpx import AsyncClient
 
             headers_dict = json.loads(headers) if headers else {}

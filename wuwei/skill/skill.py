@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Protocol, Optional
 from datetime import datetime
+from typing import Protocol
 
 
 @dataclass
@@ -25,6 +25,7 @@ class Skill:
     required_tools: list[str] = field(default_factory=list)  # 必需的工具
     model: str | None = None  # 指定模型
     tags: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)  # agentskills.io 自由扩展位
     source: str = ""  # 技能来源路径
     created_at: datetime = field(default_factory=datetime.now)
 

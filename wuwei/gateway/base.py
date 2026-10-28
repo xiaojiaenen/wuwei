@@ -1,9 +1,10 @@
 """网关基类"""
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Any
 import asyncio
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass

@@ -15,9 +15,13 @@ class Context:
         """追加一条 system 消息。"""
         self._messages.append(Message(role="system", content=content))
 
-    def add_tool_message(self, content: str, tool_call_id: str | None) -> None:
+    def add_tool_message(
+        self, content: str, tool_call_id: str | None, name: str | None = None
+    ) -> None:
         """追加一条工具返回消息。"""
-        self._messages.append(Message(role="tool", content=content, tool_call_id=tool_call_id))
+        self._messages.append(
+            Message(role="tool", content=content, tool_call_id=tool_call_id, name=name or "")
+        )
 
     def add_ai_message(
         self,
@@ -47,6 +51,10 @@ class Context:
         """清空上下文。"""
         self._messages.clear()
 
+    def replace_messages(self, messages: list[Message]) -> None:
+        """整体替换消息历史（用于从检查点恢复会话）。"""
+        self._messages = list(messages)
+
     def keep_last_turns(self, n: int) -> None:
         """只保留 system 消息和最近 n 轮对话，旧消息从内存中移除。"""
         from wuwei.memory.context_window import split_turns
@@ -61,7 +69,7 @@ class Context:
 
     def to_dict(self) -> dict:
         """序列化为 dict。"""
-        return {"messages": [m.model_dump(exclude_none=True) for m in self._messages]}
+        return {"messages": [m.model_dump(mode="json", exclude_none=True) for m in self._messages]}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Context":

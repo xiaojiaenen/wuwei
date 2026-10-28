@@ -2,8 +2,8 @@
 
 from wuwei.parsers.base import BaseOutputParser
 from wuwei.parsers.json import JsonOutputParser
-from wuwei.parsers.pydantic import PydanticOutputParser
 from wuwei.parsers.list import ListOutputParser
+from wuwei.parsers.pydantic import PydanticOutputParser
 
 __all__ = [
     "BaseOutputParser",

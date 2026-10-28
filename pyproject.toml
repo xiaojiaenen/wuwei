@@ -1,56 +1,76 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "wuwei"
-version = "3.0.1"
+version = "3.2.0"
 description = "Wuwei - 无为而治的 AI 智能体框架"
 authors = [{name = "xiaojiaenen", email = "xiaojiaenen@163.com"}]
 license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.0.0",
+    "openai>=3.23.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.3",
     "httpx>=0.25.0",
+    "jsonschema>=4.0",
+    "typing-extensions>=4.12",
 ]
 
 [project.optional-dependencies]
-# LLM 提供商
-anthropic = ["anthropic>=0.20"]
-zhipu = []  # 使用 openai 兼容模式
-dashscope = []  # 使用 openai 兼容模式
-ollama = []  # 使用 httpx
+# LLM 提供商（openai 兼容端点与 Responses API 复用核心的 openai 依赖）
+anthropic = ["anthropic>=1.11.0"]
+
+# 核心模块旧 extra 名保留兼容，无额外依赖
+graph = []
+middleware = []
+memory = []
+sandbox = []  # Local/Docker CLI；E2B 请安装 e2b extra
 
 # 扩展模块
-graph = []  # 状态图编排
-middleware = []  # 中间件系统
-mcp = ["mcp>=1.0"]  # MCP 支持
+mcp = ["mcp>=2.2,<3"]  # MCP 官方 SDK（stdio / streamable http）
 skill = ["python-frontmatter>=1.0"]  # 技能系统
 gateway = ["httpx>=0.25"]  # 多平台网关
-memory = []  # 记忆系统
 observability = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
 ]
-sandbox = []  # 沙箱执行
+# file_to_md 工具的文档转换后端
+markitdown = ["markitdown>=0.1"]
+# 沙箱执行
+e2b = ["e2b>=1.0"]
+# 向量检索后端
+chroma = ["chromadb>=0.4"]
+qdrant = ["qdrant-client>=1.9"]
+pgvector = ["asyncpg>=0.28"]
+milvus = ["pymilvus>=2.4"]
+vectorstore = ["wuwei[chroma,qdrant,pgvector,milvus]"]
+# 协议出口（MCP Server / A2A / AG-UI；HTTP 层零依赖）
+serve = ["mcp>=2.2,<3"]
 
 # 完整安装
 all = [
-    "wuwei[anthropic,zhipu,dashscope,ollama]",
-    "wuwei[graph,middleware,mcp,skill,gateway,memory,observability,sandbox]",
+    "wuwei[anthropic,mcp,skill,gateway,observability,markitdown,e2b,vectorstore,serve]",
 ]
+
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10", "mkdocs-minify-plugin>=0.8", "mkdocstrings[python]>=0.25"]
 
 # 开发依赖
 dev = [
     "pytest>=7.0",
+    "python-dotenv>=1.0",
+    "a2a-sdk>=0.3.26,<0.4",
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
 ]
+
+[project.scripts]
+wuwei-evals = "wuwei.evals.cli:main"
+wuwei-debug = "wuwei.debug:main"
 
 [project.urls]
 Homepage = "https://github.com/xiaojiaenen/wuwei"
@@ -64,10 +84,12 @@ exclude = ["tests*", "examples*"]
 
 [tool.black]
 line-length = 100
-target-version = ['py310']
+target-version = ['py311']
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 
 [tool.pytest.ini_options]

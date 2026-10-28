@@ -1,64 +1,24 @@
 # 安装
 
-## 环境要求
-
-- Python >= 3.10, < 3.14
-- 操作系统：macOS / Linux / Windows
-
-## 使用 pip 安装
+需要 Python 3.11+。
 
 ```bash
 pip install wuwei
+pip install 'wuwei[anthropic,mcp]'  # 按需扩展
+# 开发：
+pip install -e '.[dev]'
 ```
 
-## 使用 uv 安装（推荐）
+核心包含图、中间件、内存存储和本地执行驱动。graph/middleware/memory/sandbox 兼容 extra 保留为空。可选扩展：anthropic、mcp、skill、gateway、observability、markitdown、e2b、chroma、qdrant、pgvector、milvus、vectorstore、serve；all 包含所有可选 Python 扩展，外部服务需另配。
 
-```bash
-uv pip install wuwei
-```
+模型接入依赖范围：OpenAI SDK >=3.23、Anthropic SDK >=1.11（可选）；MCP >=2.2,<3；工具 schema 验证需要 jsonschema>=4。具体声明以项目 pyproject.toml 为准，版本下限不是所有上游版本的互操作承诺。
 
-## 从源码安装
-
-```bash
-git clone https://github.com/xiaojiaenen/wuwei.git
-cd wuwei
-pip install -e .
-```
-
-## 安装开发依赖
-
-```bash
-pip install -e ".[dev]"
-```
-
-开发依赖包括：
-
-| 包 | 用途 |
-|---|---|
-| `pytest` | 测试框架 |
-| `pytest-asyncio` | 异步测试支持 |
-| `black` | 代码格式化 |
-| `ruff` | 代码检查 |
-
-## 依赖说明
-
-Wuwei 的核心依赖非常精简：
-
-| 包 | 版本 | 用途 |
-|---|---|---|
-| `openai` | >= 1.0.0 | LLM 调用 (OpenAI 兼容协议) |
-| `pydantic` | >= 2.0.0 | 数据模型和验证 |
-| `pyyaml` | >= 6.0.3 | 配置文件解析 |
-| `markitdown` | >= 0.1.5 | 文档解析 (PPTX/DOCX/XLSX/PDF) |
-
-## 验证安装
+验证安装不需要读取密钥：
 
 ```python
-import wuwei
-print(wuwei.__version__)  # 应输出 0.1.8
+from importlib.metadata import version
+from wuwei import Agent, LLMGateway, ToolRegistry
+print(version("wuwei"))
 ```
 
-## 下一步
-
-- [快速上手](quickstart.md) — 5 分钟运行第一个 Agent
-- [配置](configuration.md) — 了解 LLM 和工具配置
+测试默认离线，`pytest --live` 显式开启需要账号与远程服务的测试。

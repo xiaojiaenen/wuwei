@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
@@ -27,7 +27,7 @@ def decay_score(record: MemoryRecord, now: datetime | None = None) -> float:
     - 新创建但从未被访问的记忆按 created_at 计算天数
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     ref_time = record.last_accessed or record.created_at
     if ref_time is None:
         return record.importance
@@ -95,7 +95,7 @@ class InMemoryMemoryStore:
             embedding=embedding,
             tags=tags or [],
             metadata=metadata or {},
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         self._records[record.id] = record
         return record
@@ -127,7 +127,7 @@ class InMemoryMemoryStore:
             scored.sort(key=lambda x: x[0], reverse=True)
             results = [r for _, r in scored[:limit]]
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for r in results:
             r.last_accessed = now
             r.access_count += 1
@@ -144,7 +144,7 @@ class InMemoryMemoryStore:
         self, *, namespace: str = "default", threshold: float = 0.1
     ) -> list[MemoryRecord]:
         """清理衰减分数低于阈值的记忆，返回被删除的记录列表。"""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         to_delete = [
             r
             for r in self._records.values()

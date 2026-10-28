@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wuwei.memory.knowledge_store import KnowledgeStore
 from wuwei.plugin import PluginContext
 
 

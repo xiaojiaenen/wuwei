@@ -4,8 +4,9 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Optional
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -37,7 +38,7 @@ class Runnable(ABC):
     async def invoke(
         self,
         input: Any,
-        config: Optional[RunnableConfig] = None,
+        config: RunnableConfig | None = None,
     ) -> Any:
         """执行 runnable
 
@@ -53,7 +54,7 @@ class Runnable(ABC):
     async def stream(
         self,
         input: Any,
-        config: Optional[RunnableConfig] = None,
+        config: RunnableConfig | None = None,
     ) -> AsyncIterator[Any]:
         """流式执行
 
@@ -99,7 +100,7 @@ class RunnableSequence(Runnable):
     async def invoke(
         self,
         input: Any,
-        config: Optional[RunnableConfig] = None,
+        config: RunnableConfig | None = None,
     ) -> Any:
         """按顺序执行所有 Runnable"""
         result = input
@@ -110,7 +111,7 @@ class RunnableSequence(Runnable):
     async def stream(
         self,
         input: Any,
-        config: Optional[RunnableConfig] = None,
+        config: RunnableConfig | None = None,
     ) -> AsyncIterator[Any]:
         """流式执行管道"""
         result = input

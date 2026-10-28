@@ -244,22 +244,18 @@ test_plugins()
 
 # ═══════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("Test 6: LLM Adapters — Anthropic / Ollama / DashScope / Zhipu 配置")
+print("Test 6: LLM Adapters — OpenAI / Responses / Anthropic 配置")
 print("=" * 60)
 
 def test_all_adapters():
     from wuwei.llm.adapters.anthropic import AnthropicAdapter
-    from wuwei.llm.adapters.ollama import OllamaAdapter
-    from wuwei.llm.adapters.dashscope import DashScopeAdapter
-    from wuwei.llm.adapters.zhipu import ZhipuAdapter
     from wuwei.llm.adapters.openai import OpenAIAdapter
+    from wuwei.llm.adapters.responses import ResponsesAdapter
 
     # 各适配器都能实例化（不需要真实 API key 来测配置逻辑）
     check("OpenAIAdapter 类型", issubclass(OpenAIAdapter, object))
     check("AnthropicAdapter 类型", issubclass(AnthropicAdapter, object))
-    check("OllamaAdapter 类型", issubclass(OllamaAdapter, object))
-    check("DashScopeAdapter 类型", issubclass(DashScopeAdapter, object))
-    check("ZhipuAdapter 类型", issubclass(ZhipuAdapter, object))
+    check("ResponsesAdapter 类型", issubclass(ResponsesAdapter, object))
 
     # Agent.from_env 工厂方法
     from wuwei.agent import Agent

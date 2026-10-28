@@ -5,7 +5,7 @@
 通信模式：
 1. **Fan-out（扇出）**：Leader 分解任务后，多个 Member 并行执行
 2. **Handoff（交接）**：Agent 直接交接给另一个 Agent（带上下文）
-3. **Shared State（共享状态）**：通过 StateGraph 的 channels 共享中间结果
+3. **Shared State（共享状态）**：成员通过 Leader 分派与结果汇总协作
 
 架构：
     StateGraph:
@@ -26,22 +26,63 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
 from wuwei.agent.agent import Agent
-from wuwei.core.message import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from wuwei.core.message import AIMessage, HumanMessage, SystemMessage
 from wuwei.graph.graph import END, CompiledGraph, StateGraph
 from wuwei.graph.state import State
-from wuwei.llm.types import Message
 from wuwei.middleware.base import Middleware, MiddlewareContext
+
+_delegate_depth = ContextVar("wuwei_delegate_depth", default=0)
+
+
+class DelegationStoppedError(RuntimeError):
+    """A member did not complete; result retains usage and approval payload."""
+
+    def __init__(self, result):
+        self.result = result
+        self.status = result.status
+        self.interrupt = getattr(result, "interrupt", None)
+        super().__init__(f"Delegated agent stopped: {result.status}")
+
+
+async def _governed_run(agent, task, *, system_prompt=None, middleware=None):
+    from wuwei.agent.sub_agent import inherit_middleware
+    from wuwei.runtime.context import current_context
+
+    parent = current_context.get()
+    depth = _delegate_depth.get()
+    if depth >= 8:
+        raise RuntimeError("Maximum delegation depth exceeded")
+    token = _delegate_depth.set(depth + 1)
+    try:
+        worker = Agent(
+            llm=agent.llm,
+            tools=agent.tool_registry,
+            load_builtins=False,
+            default_system_prompt=system_prompt or agent.default_system_prompt,
+            default_max_steps=agent.default_max_steps,
+            middleware=inherit_middleware(
+                parent.config.get("middleware") if parent else None,
+                inherit_middleware(middleware, agent.middleware),
+            ),
+            checkpointer=agent.checkpointer,
+            event_bus=agent.event_bus,
+        )
+        result = await worker.run(task, session=worker.create_session())
+        if result.status != "completed":
+            raise DelegationStoppedError(result)
+        return result
+    finally:
+        _delegate_depth.reset(token)
 
 
 @dataclass
 class TeamMember:
     """团队成员 — 拥有独立 Agent 实例"""
+
     name: str
     agent: Agent
     role: str
@@ -56,6 +97,7 @@ class HandoffSignal:
     借鉴 LangGraph 的 Command(goto=...) 模式。
     一个 Agent 完成任务后，可以将控制权交接给另一个 Agent。
     """
+
     source: str
     target: str
     context: str  # 交接时的上下文/结果摘要
@@ -87,7 +129,7 @@ class MultiAgentGraph:
         self.members: dict[str, TeamMember] = {}
         self._max_steps: int = 20
 
-    def set_leader(self, agent: Agent) -> "MultiAgentGraph":
+    def set_leader(self, agent: Agent) -> MultiAgentGraph:
         """设置领导者 Agent"""
         self.leader = agent
         return self
@@ -99,7 +141,7 @@ class MultiAgentGraph:
         role: str,
         description: str = "",
         tools: list[str] | None = None,
-    ) -> "MultiAgentGraph":
+    ) -> MultiAgentGraph:
         """添加工作 Agent"""
         self.members[name] = TeamMember(
             name=name,
@@ -110,8 +152,10 @@ class MultiAgentGraph:
         )
         return self
 
-    def set_max_steps(self, steps: int) -> "MultiAgentGraph":
+    def set_max_steps(self, steps: int) -> MultiAgentGraph:
         """设置最大步数"""
+        if steps <= 0:
+            raise ValueError("steps must be positive")
         self._max_steps = steps
         return self
 
@@ -125,8 +169,8 @@ class MultiAgentGraph:
             raise ValueError("请先调用 set_leader() 设置领导者")
         if not self.members:
             # 没有成员，领导自己执行
-            result = await self.leader.run(task)
-            return result.content if hasattr(result, 'content') else str(result)
+            result = await _governed_run(self.leader, task)
+            return result.content if hasattr(result, "content") else str(result)
 
         graph = self._build_graph()
         initial_state = State(
@@ -139,6 +183,8 @@ class MultiAgentGraph:
         )
 
         final_state = await graph.invoke(initial_state)
+        if not final_state.metadata.get("_team_completed"):
+            raise RuntimeError("Team execution incomplete: graph step limit reached")
         last_ai = final_state.get_last_ai_message()
         return last_ai.content if last_ai else ""
 
@@ -157,8 +203,12 @@ class MultiAgentGraph:
             step=0,
         )
 
+        final_state = initial_state
         async for event in graph.stream(initial_state):
+            final_state = event.get("state", final_state)
             yield event
+        if not final_state.metadata.get("_team_completed"):
+            raise RuntimeError("Team execution incomplete: graph step limit reached")
 
     def _build_leader_system_prompt(self) -> str:
         """构建领导者的系统提示（包含成员信息）"""
@@ -202,15 +252,16 @@ assignments:
 
         # Node 1: Leader 分析任务
         async def leader_node(state: State, config: dict | None = None) -> State:
-            msgs = [m for m in state.messages]
-            response = await self.leader.llm.generate(msgs, tools=[])
-            ai_msg = AIMessage(
-                content=response.message.content or "",
-                tool_calls=response.message.tool_calls or [],
+            response = await _governed_run(
+                self.leader,
+                state.messages[-1].content or "",
+                system_prompt=self._build_leader_system_prompt(),
             )
+            ai_msg = AIMessage(content=response.content or "")
             state.add_message(ai_msg)
-            state.metadata["_leader_response"] = response.message.content or ""
-            state.metadata["_has_assignments"] = "[DECISION]" in (response.message.content or "")
+            state.metadata["_leader_response"] = response.content or ""
+            state.metadata["_has_assignments"] = "[DECISION]" in (response.content or "")
+            state.metadata["_team_completed"] = not state.metadata["_has_assignments"]
             return state
 
         # Node 2: 并行执行分配
@@ -220,36 +271,47 @@ assignments:
             # 解析分配
             assignments = self._parse_assignments(leader_response)
             if not assignments:
-                # 没有明确分配，让每个成员基于自己的角色给出意见
-                task = ""
-                for msg in state.messages:
-                    if msg.role == "user":
-                        task = msg.content or ""
-                        break
-                assignments = [
-                    {"member": name, "task": task}
-                    for name in self.members.keys()
-                ]
+                raise ValueError("Leader emitted an invalid or empty assignment block")
+            for assignment in assignments:
+                if (
+                    not isinstance(assignment, dict)
+                    or assignment.get("member") not in self.members
+                    or not isinstance(assignment.get("task"), str)
+                ):
+                    raise ValueError("Invalid team assignment")
 
             # 并行执行
             async def execute_one(member_name: str, sub_task: str) -> tuple[str, str]:
                 member = self.members.get(member_name)
                 if not member:
                     return (member_name, f"Member '{member_name}' not found")
-                try:
-                    result = await member.agent.run(sub_task)
-                    content = result.content if hasattr(result, 'content') else str(result)
-                    return (member_name, content)
-                except Exception as e:
-                    return (member_name, f"Error: {e}")
+                result = await _governed_run(
+                    member.agent, sub_task, middleware=self.leader.middleware
+                )
+                return (member_name, result.content)
 
-            tasks = [
-                execute_one(a["member"], a["task"])
-                for a in assignments
-                if a.get("member") in self.members
-            ]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [asyncio.create_task(execute_one(a["member"], a["task"])) for a in assignments]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException as exc:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                exc.delegation_outcomes = [
+                    {
+                        "member": assignment["member"],
+                        "status": "unknown"
+                        if isinstance(outcome, asyncio.CancelledError)
+                        else "failed"
+                        if isinstance(outcome, BaseException)
+                        else "completed",
+                        "result": None if isinstance(outcome, BaseException) else outcome[1],
+                        "error": str(outcome) if isinstance(outcome, BaseException) else None,
+                    }
+                    for assignment, outcome in zip(assignments, outcomes, strict=True)
+                ]
+                raise
 
             # 将成员结果写入 state
             results_text = []
@@ -258,24 +320,22 @@ assignments:
                     results_text.append(f"Error: {r}")
                 else:
                     member_name, content = r
-                    results_text.append(
-                        f"## {member_name} 的执行结果\n\n{content}\n"
-                    )
+                    results_text.append(f"## {member_name} 的执行结果\n\n{content}\n")
 
             summary = "\n\n".join(results_text)
-            state.add_message(
-                HumanMessage(content=f"以下是各成员执行结果：\n\n{summary}")
-            )
+            state.add_message(HumanMessage(content=f"以下是各成员执行结果：\n\n{summary}"))
             state.metadata["_results_ready"] = True
             return state
 
         # Node 3: Leader 汇总
         async def synthesis_node(state: State, config: dict | None = None) -> State:
-            msgs = [m for m in state.messages]
-            response = await self.leader.llm.generate(msgs, tools=[])
-            state.add_message(
-                AIMessage(content=response.message.content or "")
+            response = await _governed_run(
+                self.leader,
+                "\n\n".join(m.content or "" for m in state.messages if m.role != "system"),
+                system_prompt=self._build_leader_system_prompt(),
             )
+            state.add_message(AIMessage(content=response.content or ""))
+            state.metadata["_team_completed"] = True
             return state
 
         # 条件路由
@@ -293,11 +353,13 @@ assignments:
 
         graph.set_entry_point("leader")
         graph.add_conditional_edges(
-            "leader", route_after_leader,
+            "leader",
+            route_after_leader,
             {"fan_out": "fan_out", "end": END},
         )
         graph.add_conditional_edges(
-            "fan_out", route_after_fan_out,
+            "fan_out",
+            route_after_fan_out,
             {"synthesis": "synthesis"},
         )
         graph.add_edge("synthesis", END)
@@ -311,9 +373,11 @@ assignments:
 
         try:
             import re
+
             import yaml
+
             # 提取 [DECISION]...[/DECISION] 块
-            match = re.search(r'\[DECISION\](.*?)\[/DECISION\]', text, re.DOTALL)
+            match = re.search(r"\[DECISION\](.*?)\[/DECISION\]", text, re.DOTALL)
             if not match:
                 return []
 
@@ -362,9 +426,11 @@ class HandoffMiddleware(Middleware):
             return ctx
 
         import re
+
         match = re.search(
             r'\[HANDOFF\s+to="(\w+)"\](.*?)\[/HANDOFF\]',
-            content, re.DOTALL,
+            content,
+            re.DOTALL,
         )
         if not match:
             return ctx
@@ -378,11 +444,13 @@ class HandoffMiddleware(Middleware):
 
         # 将当前上下文转发给目标 Agent
         try:
-            result = await target_agent.run(handoff_content)
-            result_text = result.content if hasattr(result, 'content') else str(result)
+            result = await _governed_run(target_agent, handoff_content)
+            result_text = result.content if hasattr(result, "content") else str(result)
             # 替换 Handoff 块为实际结果
             new_content = content.replace(match.group(0), result_text)
             response.content = new_content
+        except DelegationStoppedError:
+            raise
         except Exception as e:
             response.content = content.replace(
                 match.group(0),

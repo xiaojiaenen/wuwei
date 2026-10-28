@@ -1,27 +1,27 @@
-"""记忆中间件"""
+"""记忆中间件
 
-from typing import Optional
-from wuwei.middleware.base import Middleware, MiddlewareContext
+结合记忆检索和记忆提取功能。
+注入只作用于本轮 LLM 调用的消息视图，不写入会话历史，因此不会堆积。
+"""
+
+import json
+
 from wuwei.core.message import AIMessage, BaseMessage, SystemMessage
 from wuwei.llm.gateway import LLMGateway
+from wuwei.middleware.base import Middleware, MiddlewareContext
+from wuwei.middleware.rag import _injection_position
 
 
 class MemoryMiddleware(Middleware):
     """记忆中间件
 
-    结合记忆检索和记忆提取功能。
-
     示例：
         from wuwei.memory import InMemoryMemoryStore
 
         memory_store = InMemoryMemoryStore()
-        middleware = MemoryMiddleware(
-            llm=llm,
-            memory_store=memory_store,
-        )
+        middleware = MemoryMiddleware(llm=llm, memory_store=memory_store)
     """
 
-    # 记忆提取提示词模板
     EXTRACTION_PROMPT = """从以下对话中提取用户的关键信息，用于后续个性化服务。
 
 只提取以下类型的信息：
@@ -54,7 +54,7 @@ class MemoryMiddleware(Middleware):
         """
         Args:
             llm: LLM 网关
-            memory_store: 记忆存储
+            memory_store: 记忆存储（实现 search(query, limit=...) 协议）
             top_k: 检索的最大记忆数
             min_importance: 最小重要性阈值
             extract_every_n: 每 N 次对话提取一次记忆（避免过度调用 LLM）
@@ -66,50 +66,39 @@ class MemoryMiddleware(Middleware):
         self.min_importance = min_importance
         self.extract_every_n = extract_every_n
         self.namespace = namespace
-        self._turn_count = 0
+        if extract_every_n <= 0:
+            raise ValueError("extract_every_n must be positive")
 
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """LLM 调用前检索相关记忆"""
         if not ctx.state or not ctx.state.messages:
             return ctx
 
-        # 获取最后一条用户消息
         last_user_msg = None
         for msg in reversed(ctx.state.messages):
             if msg.role == "user":
                 last_user_msg = msg
                 break
-
-        if not last_user_msg:
+        if not last_user_msg or not last_user_msg.content:
             return ctx
 
-        # 搜索相关记忆
         memories = await self.memory_store.search(
             last_user_msg.content,
-            top_k=self.top_k,
+            namespace=self.namespace,
+            limit=self.top_k,
         )
+        if not memories:
+            return ctx
 
-        if memories:
-            # 过滤低重要性记忆
-            memories = [
-                m for m in memories
-                if m.importance >= self.min_importance
-            ]
+        memories = [m for m in memories if m.importance >= self.min_importance]
+        if not memories:
+            return ctx
 
-            if memories:
-                # 构建记忆文本
-                memory_texts = []
-                for m in memories:
-                    memory_texts.append(f"- {m.content}")
-
-                memory_text = "\n".join(memory_texts)
-
-                # 注入到消息开头
-                ctx.state.messages.insert(
-                    0,
-                    SystemMessage(content=f"相关记忆：\n{memory_text}"),
-                )
-
+        memory_text = "\n".join(f"- {m.content}" for m in memories)
+        ctx.state.messages.insert(
+            _injection_position(ctx.state.messages),
+            SystemMessage(content=f"以下是关于用户的已知记忆，供回答时参考：\n{memory_text}"),
+        )
         return ctx
 
     async def after_llm(
@@ -121,17 +110,25 @@ class MemoryMiddleware(Middleware):
         if not ctx.state or not ctx.state.messages:
             return ctx
 
-        self._turn_count += 1
-        if self._turn_count % self.extract_every_n != 0:
+        session = ctx.config.get("session")
+        owner = (
+            session.metadata.setdefault("middleware_state", {})
+            if session is not None
+            else ctx.metadata
+        )
+        memory_state = owner.setdefault(
+            f"memory_extraction:{self.namespace}:{self.extract_every_n}", {}
+        )
+        count = memory_state["turn_count"] = memory_state.get("turn_count", 0) + 1
+        if count % self.extract_every_n != 0:
             return ctx
 
-        # 获取最近的对话
         recent_messages = ctx.state.messages[-5:]
-        conversation_parts = []
-        for msg in recent_messages:
-            if msg.role in ("user", "assistant"):
-                conversation_parts.append(f"{msg.role}: {msg.content}")
-
+        conversation_parts = [
+            f"{msg.role}: {msg.content}"
+            for msg in recent_messages
+            if msg.role in ("user", "assistant") and msg.content
+        ]
         if not conversation_parts:
             return ctx
 
@@ -139,13 +136,15 @@ class MemoryMiddleware(Middleware):
         prompt = self.EXTRACTION_PROMPT.format(conversation=conversation)
 
         try:
-            response = await self.llm.generate(
-                messages=[BaseMessage(role="user", content=prompt)],
+            messages = [BaseMessage(role="user", content=prompt)]
+            model_call = ctx.config.get("model_call")
+            extraction = (
+                await model_call(messages, tools=None)
+                if model_call
+                else await self.llm.generate(messages=messages)
             )
 
-            import json
-            content = response.message.content or ""
-            # 提取 JSON
+            content = extraction.message.content or ""
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             elif "```" in content:
@@ -162,9 +161,12 @@ class MemoryMiddleware(Middleware):
                         namespace=self.namespace,
                         importance=memory.get("importance", 0.5),
                     )
+        except Exception as exc:
+            from wuwei.middleware.budget import BudgetExhausted
 
-        except Exception:
-            # 记忆提取失败不影响主流程
+            if isinstance(exc, BudgetExhausted):
+                raise
+            # Optional extraction failures do not abort an otherwise valid response.
             pass
 
         return ctx

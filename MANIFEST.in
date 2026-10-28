@@ -1,0 +1,7 @@
+include README.md USAGE.md MIGRATION.md CHANGELOG.md mkdocs.yml
+recursive-include tests *.py
+recursive-include docs *.md *.css
+recursive-include examples *.py *.md *.json *.yaml
+prune docs/audits
+prune docs/superpowers
+global-exclude __pycache__ *.py[cod] .env

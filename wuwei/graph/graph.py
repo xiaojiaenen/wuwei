@@ -8,12 +8,12 @@
 - 流式执行：基于 async generator 的节点级事件流
 """
 
-import asyncio
 import inspect
 import time
-from collections.abc import AsyncIterator
-from typing import Any, Callable, Optional
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
+from wuwei.graph.reducers import overwrite
 from wuwei.graph.state import State
 
 
@@ -40,18 +40,32 @@ class StateGraph:
     def __init__(self, state_type: type = State):
         self.state_type = state_type
         self.nodes: dict[str, Callable] = {}
+        self.writes: dict[str, dict[str, Callable]] = {}  # node -> {field: reducer}
         self.edges: dict[str, str | tuple[Callable, dict]] = {}
-        self.entry_point: Optional[str] = None
+        self.entry_point: str | None = None
         self._max_steps: int = 100
 
-    def add_node(self, name: str, func: Callable) -> "StateGraph":
+    def add_node(
+        self,
+        name: str,
+        func: Callable,
+        writes: dict[str, Callable] | None = None,
+    ) -> "StateGraph":
         """添加节点
 
         Args:
             name: 节点名称
             func: 节点处理函数 async (state, config) -> State
+            writes: 可选的字段归并声明——节点返回 dict 时，
+                {"字段名": reducer(current, new) -> merged}。
+                未声明的字段默认 overwrite；未知字段写入 state.metadata。
+
+        示例：
+            graph.add_node("research", research_fn, writes={"findings": extend})
         """
         self.nodes[name] = func
+        if writes:
+            self.writes[name] = writes
         return self
 
     def add_edge(self, source: str, target: str) -> "StateGraph":
@@ -117,6 +131,22 @@ class CompiledGraph:
         self.checkpointer = checkpointer
         return self
 
+    def _apply_writes(self, node: str, state: State, updates: dict) -> None:
+        """把节点返回的 dict 按 writes 声明归并进状态。
+
+        - messages/metadata/step 与 dataclass 自定义字段 → setattr（按 reducer 归并）
+        - 其它键 → 写入 state.metadata（按 reducer 归并，默认 overwrite）
+        """
+        reducers = self.graph.writes.get(node, {})
+        for key, value in updates.items():
+            reducer = reducers.get(key, overwrite)
+            if hasattr(state, key):
+                current = getattr(state, key)
+                setattr(state, key, reducer(current, value))
+            else:
+                current = state.metadata.get(key)
+                state.metadata[key] = reducer(current, value)
+
     async def _resolve_next_node(
         self,
         current_node: str,
@@ -161,7 +191,11 @@ class CompiledGraph:
                 break
 
             node_func = self.graph.nodes[current_node]
-            state = await node_func(state, config)
+            result = await node_func(state, config)
+            if isinstance(result, dict):
+                self._apply_writes(current_node, state, result)
+            else:
+                state = result
             state.step = step
 
             if self.checkpointer:
@@ -216,6 +250,7 @@ class CompiledGraph:
             # 如果节点函数是 async generator（用于细粒度事件）
             result = node_func(state, config)
             if inspect.isasyncgen(result):
+                node_event = {}
                 async for node_event in result:
                     node_event["node"] = current_node
                     node_event["step"] = step
@@ -224,7 +259,11 @@ class CompiledGraph:
                 # 从最后一个 yield 获取 state
                 state = node_event.get("state", state)
             else:
-                state = await result
+                update = await result
+                if isinstance(update, dict):
+                    self._apply_writes(current_node, state, update)
+                else:
+                    state = update
                 yield {
                     "node": current_node,
                     "state": state,

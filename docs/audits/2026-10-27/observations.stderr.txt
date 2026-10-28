@@ -1,0 +1,11 @@
+构建中间件失败: {'type': 'hitl', 'policy': 'typo'}
+Traceback (most recent call last):
+  File "/Users/xiaojia/code/wuwei/wuwei/config/yaml_loader.py", line 155, in create_agent_from_config
+    stack.add(_build_middleware(spec))
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/xiaojia/code/wuwei/wuwei/config/yaml_loader.py", line 108, in _build_middleware
+    return HitlMiddleware(
+           ^^^^^^^^^^^^^^^
+  File "/Users/xiaojia/code/wuwei/wuwei/middleware/hitl.py", line 88, in __init__
+    raise ValueError(f"approval_policy 只支持 all/declared，收到: {approval_policy}")
+ValueError: approval_policy 只支持 all/declared，收到: typo

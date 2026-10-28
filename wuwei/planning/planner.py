@@ -35,8 +35,8 @@ class Planner:
 3. 使用 `next` 表示当前任务完成后可以进入的下游任务 ID 列表。
 4. 如果任务 B 依赖任务 A 的结果，则任务 A 的 `next` 必须包含 B 的 ID。
 5. 只有真正互不依赖的任务才允许并行。
-6. 必须且只能有一个起始任务，它的 `status` 为 `"in_progress"`。
-7. 其他任务的 `status` 必须为 `"pending"`。
+6. 必须且只能有一个起始任务。
+7. 所有任务的 `status` 必须为 `"pending"`；规划阶段尚未执行任何任务。
 8. 规划阶段所有任务的 `result` 和 `error` 都必须为 `null`。
 9. 默认输出 2 到 5 个任务；只有目标非常简单时，才允许少于 2 个任务。
 10. `description` 必须可以直接交给执行器执行，不要使用空泛表述。
@@ -48,7 +48,7 @@ class Planner:
 - `id`: 从 1 开始递增的整数
 - `description`: 任务描述
 - `next`: 下游任务 ID 列表
-- `status`: 只能是 `pending`、`in_progress`、`completed`、`failed`、`blocked`
+- `status`: 固定为 `pending`
 - `result`: 固定为 null
 - `error`: 固定为 null
 
@@ -75,6 +75,13 @@ class Planner:
             raise ValueError("Planner 未返回任何内容")
 
         wrapper = TaskList.model_validate_json(content)
+        # These are newly proposed tasks, not persisted execution snapshots. Older
+        # planner prompts used in_progress for the root; never treat that as live work.
+        for task in wrapper.tasks:
+            task.status = "pending"
+            task.result = task.error = task.interrupt = task.session_id = None
+            task.usage = {}
+            task.llm_calls = 0
         return wrapper.tasks
 
     @classmethod
