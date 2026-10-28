@@ -81,6 +81,7 @@ asyncio.run(main())
 - [迁移指南](MIGRATION.md)：兼容入口与行为变化。
 - [在线文档入口](docs/index.md)及[可执行离线示例](docs/examples/offline.md)。
 - [更新日志](CHANGELOG.md)。
+- [发布指南](docs/RELEASING.md)：GitHub Actions + PyPI Trusted Publishing。
 
 ```bash
 pytest                 # 默认离线测试
