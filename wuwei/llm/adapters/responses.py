@@ -32,12 +32,13 @@ class ResponsesAdapter(BaseAdapter):
         model: str = "gpt-4o",
         base_url: str | None = None,
         temperature: float | None = None,
-        prompt_cache_options: dict[str, Any] | None = None,
-        prompt_cache_key: str | None = None,
         max_output_tokens: int = 4096,
         client=None,
         client_factory=None,
         owns_client=None,
+        *,
+        prompt_cache_options: dict[str, Any] | None = None,
+        prompt_cache_key: str | None = None,
         **kwargs,
     ):
         self.client, self.owns_client = make_client(

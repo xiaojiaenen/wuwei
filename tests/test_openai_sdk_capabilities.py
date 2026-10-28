@@ -117,3 +117,11 @@ async def test_cache_request_serialized_by_actual_sdk():
         assert adapter.parse_response(raw).usage['cached_tokens'] == 60
     assert seen[0]['prompt_cache_options']['ttl'] == '30m'
     assert 'temperature' not in seen[0]
+
+
+def test_responses_original_positional_constructor():
+    client = Ns()
+    adapter = ResponsesAdapter('unused', 'test', None, 0.4, 42, client)
+    request = adapter.build_request([])
+    assert request['max_output_tokens'] == 42 and request['temperature'] == 0.4
+    assert adapter.client is client
