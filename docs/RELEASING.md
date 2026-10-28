@@ -25,9 +25,9 @@
 ```bash
 git switch master
 git pull --ff-only origin master
-# 当前项目版本为 3.2.1；后续按实际版本修改标签。
-git tag -a v3.2.1 -m 'Release 3.2.1'
-git push origin v3.2.1
+# 当前项目版本为 3.2.2；后续按实际版本修改标签。
+git tag -a v3.2.2 -m 'Release 3.2.2'
+git push origin v3.2.2
 ```
 
 在 Actions 查看 Publish to PyPI，必要时批准 `pypi` 环境部署。推送标签会触发正式上传；不要在绑定完成前推送。标签必须严格等于 `v` + `project.version`，否则发布会被阻止。
@@ -35,7 +35,7 @@ git push origin v3.2.1
 上传后在 https://pypi.org/project/wuwei/ 确认版本，并在独立环境安装验证：
 
 ```bash
-uv run --isolated --no-project --with 'wuwei==3.2.1' \
+uv run --isolated --no-project --with 'wuwei==3.2.2' \
   python -c "from importlib.metadata import version; print(version('wuwei'))"
 ```
 

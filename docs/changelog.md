@@ -1,5 +1,12 @@
 # 更新日志
 
+## 3.2.2 — 2026-10-28
+
+- OpenAI SDK 最低版本更新至 3.40.0，Responses 支持显式配置 prompt_cache_options / prompt_cache_key。
+- 缓存读取、缓存写入和推理 token 细分统计贯通普通/流式运行、委派与规划汇总，不重复计入总 token。
+- Responses 默认省略 temperature；保留显式配置、Chat Completions 默认值和适配器原有位置参数兼容性。
+- 补充缓存配置、预算估算边界及离线 SDK 契约测试。
+
 ## 3.2.1 — 2026-10-28
 
 - 更新补丁版本号，承接执行契约、模型接入及协议兼容性加固。
