@@ -140,6 +140,12 @@ nav:
   - 工具治理与代码执行: governance.md
   - 协议与部署: protocols.md
   - 存储与运维: operations.md
+  - 生产契约:
+    - 模型与内容: model-contracts.md
+    - 工具与运行状态: runtime-contracts.md
+    - 持久会话与任务: guides/durable-execution.md
+    - 评估与资源生命周期: guides/quality-and-lifecycle.md
+    - PyPI 发布: RELEASING.md
   - API 参考:
     - 模块索引: api/reference.md
   - 示例:

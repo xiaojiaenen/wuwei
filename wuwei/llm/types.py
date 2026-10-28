@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 # 从 core.message 导入统一的消息类型（再导出，供外部统一从 wuwei.llm 导入）
 from wuwei.core.message import BaseMessage as Message
-from wuwei.core.message import FunctionCall, ToolCall
+from wuwei.core.message import ContentPart, FunctionCall, ToolCall
 
 __all__ = [
     "Message",
@@ -43,6 +43,7 @@ class AdapterEvent(TypedDict, total=False):
 
 
 class LLMResponseChunk(BaseModel):
+    content_parts: list[ContentPart] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     content: str
     reasoning_content: str | None = None
@@ -83,6 +84,8 @@ class AgentEvent(BaseModel):
 
 
 class AgentRunResult(BaseModel):
+    content_parts: list[ContentPart] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     usage_available: bool = True
     content: str
     usage: dict[str, int] = Field(

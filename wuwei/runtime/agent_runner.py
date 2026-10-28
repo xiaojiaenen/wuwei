@@ -53,6 +53,9 @@ class AgentRunner:
         self._metadata = {}
         self._parent = None
         self.response_model = None
+        self.output_spec = None
+        self.deps = None
+        self.run_context = None
         self.max_output_retries = 2
         self._resources = {}
         self._last_ctx = None
@@ -83,6 +86,8 @@ class AgentRunner:
         loaded = state if state is not None else await self.checkpointer.load(payload.checkpoint_id)
         if loaded.metadata.get("session_id") != self.session.session_id:
             raise ValueError("Interrupt session does not match checkpoint")
+        if loaded.metadata.get("schema_version", 1) not in (1, 2):
+            raise ValueError("Unsupported checkpoint schema version")
         kind = loaded.metadata.get("kind")
         if kind not in ("interrupt", "pre_tool", "step", "tool_result", "fork"):
             raise ValueError("Checkpoint is not safely resumable; tool outcome may be unknown")
@@ -101,7 +106,9 @@ class AgentRunner:
                 raise ValueError("Approval tool_call_id does not match checkpoint")
             if payload.run_id and payload.run_id != loaded.metadata.get("run_id"):
                 raise ValueError("Approval run does not match checkpoint")
-        saved_run = loaded.metadata.get("run_state") or {}
+        from wuwei.runtime.contracts import RunState
+
+        saved_run = RunState.model_validate(loaded.metadata.get("run_state") or {}).model_dump()
         cached = saved_run.get("batch_results", {})
         if any(
             saved_run.get("tool_states", {}).get(tc["id"]) in ("running", "unknown")
@@ -123,6 +130,95 @@ class AgentRunner:
                 },
             )
         )
+
+    async def reconcile(self, checkpoint_id, *, tool_call_id, outcome, operator, evidence):
+        """Record an authoritative external result without replaying the action.
+
+        The atomic replacement is durable before continuation is allowed. Evidence
+        is required even for an externally confirmed failure.
+        """
+        from wuwei.tools.outcome import ToolOutcome
+
+        if not isinstance(outcome, ToolOutcome) or outcome.status == "unknown":
+            raise ValueError("Reconciliation requires a known ToolOutcome")
+        if not operator or not str(evidence).strip():
+            raise ValueError("Reconciliation requires operator and evidence")
+        if self.checkpointer is None:
+            raise ValueError("Reconciliation requires checkpointer")
+        async with self.session.lock:
+            saved = await self.checkpointer.load(checkpoint_id)
+            if saved.metadata.get("session_id") != self.session.session_id:
+                raise ValueError("Reconciliation session does not match checkpoint")
+            if saved.metadata.get("schema_version", 1) not in (1, 2):
+                raise ValueError("Unsupported checkpoint schema version")
+            from wuwei.runtime.contracts import RunState
+
+            state = RunState.model_validate(saved.metadata.get("run_state") or {}).model_dump()
+            if state.get("tool_states", {}).get(tool_call_id) not in (
+                "unknown",
+                "running",
+                "preparing",
+            ):
+                raise ValueError("Tool is not awaiting reconciliation")
+            calls = state.get("unresolved_calls", [])
+            call = next(
+                (ToolCall.model_validate(c) for c in calls if c["id"] == tool_call_id), None
+            )
+            if call is None:
+                raise ValueError("Missing saved call evidence; cannot resume")
+            message = outcome.to_message(call.id, call.function.name)
+            saved.messages = [
+                m
+                for m in saved.messages
+                if not (m.role == "tool" and getattr(m, "tool_call_id", None) == call.id)
+            ]
+            saved.messages.append(message)
+            state["tool_states"][call.id] = message.status
+            state.pop("unknown_tool", None)
+            state.setdefault("reconciliations", []).append(
+                {
+                    "call_id": call.id,
+                    "operator": operator,
+                    "evidence": evidence,
+                    "outcome": outcome.model_dump(mode="json"),
+                    "time": time.time(),
+                }
+            )
+            remaining = [c for c in calls if c["id"] != call.id]
+            still_unknown = any(
+                v in ("unknown", "running", "preparing") for v in state["tool_states"].values()
+            )
+            state["unresolved_calls"] = remaining
+            state["status"] = "unknown" if still_unknown else "running"
+            saved.metadata.update(
+                kind="final" if still_unknown else "step",
+                run_state=state,
+                pending_tool_calls=remaining,
+            )
+            if not still_unknown:
+                saved.metadata.get("session", {}).get("metadata", {}).pop("_blocked_run", None)
+            replacement = await self.checkpointer.replace_current(
+                checkpoint_id, saved, metadata=saved.metadata
+            )
+            if still_unknown:
+                self.session.context.replace_messages(
+                    [m.model_copy(deep=True) for m in saved.messages]
+                )
+                return {
+                    "status": "unknown",
+                    "checkpoint_id": replacement,
+                    "reconciled_call_id": call.id,
+                }
+            self.session.metadata.pop("_blocked_run", None)
+        payload = InterruptPayload(
+            checkpoint_id=replacement,
+            session_id=self.session.session_id,
+            tool_name=call.function.name,
+            tool_args=call.function.arguments,
+            run_id=state["run_id"],
+            tool_call_id=call.id,
+        )
+        return await self.resume(payload)
 
     async def _iter_events(self, user_input, *, stream, task=None, resume=None):
         async with self.session.lock:
@@ -154,6 +250,10 @@ class AgentRunner:
                 "event_bus": self.event_bus,
                 "session": self.session,
                 "parent_context": self._parent,
+                "run_context": self.run_context,
+                "run_state": self._metadata,
+                "model": getattr(self.llm, "model", ""),
+                "provider": getattr(self.llm, "provider", ""),
                 "_runtime_resources": self._resources,
             },
             step=meta["step_index"],
@@ -198,6 +298,14 @@ class AgentRunner:
         finally:
             current_context.reset(token)
 
+    @staticmethod
+    def _persistent_state(meta):
+        from wuwei.runtime.contracts import RunState
+
+        return RunState.model_validate(
+            {k: v for k, v in meta.items() if k != "background_tasks"}
+        ).model_dump(mode="json")
+
     async def _save_checkpoint(self, *, kind, pending=None, approval_call=None, continuation=None):
         if self.checkpointer is None:
             return None
@@ -208,7 +316,7 @@ class AgentRunner:
             "session_id": self.session.session_id,
             "run_id": meta["run_id"],
             "step": meta["step_index"],
-            "run_state": {k: v for k, v in meta.items() if k != "background_tasks"},
+            "run_state": self._persistent_state(meta),
             "session": self.session.to_dict(),
             "pending_tool_calls": [tc.model_dump(mode="json") for tc in pending or []],
         }
@@ -271,7 +379,11 @@ class AgentRunner:
                 self._parent = MiddlewareContext(
                     state=State(), config={}, metadata=saved.metadata["ancestor_state"]
                 )
-            self._metadata.update(saved.metadata.get("run_state") or {})
+            from wuwei.runtime.contracts import RunState
+
+            self._metadata.update(
+                RunState.model_validate(saved.metadata.get("run_state") or {}).model_dump()
+            )
             self._metadata["run_id"] = saved.metadata.get("run_id") or run_id
             self.session.context.replace_messages([m.model_copy(deep=True) for m in saved.messages])
             pending = [
@@ -293,7 +405,26 @@ class AgentRunner:
             self.session.metadata.pop("_pending_interrupt", None)
         else:
             self.session.context.add_user_message(user_input)
+        from wuwei.runtime.contracts import RunContext
+
+        inherited_deps = self.run_context.deps if self.run_context is not None else self.deps
+        self.run_context = RunContext(
+            inherited_deps,
+            self._metadata["run_id"],
+            self.session.session_id,
+            self._parent.metadata.get("run_id") if self._parent else None,
+        )
         meta = self._metadata
+        if self._parent is not None:
+            meta["parent_run_id"] = self._parent.metadata.get("run_id")
+        if self.output_spec is None and meta.get("output_spec"):
+            from wuwei.llm.output import OutputSpec
+
+            self.output_spec = OutputSpec.model_validate(meta["output_spec"])
+        if self.output_spec is not None:
+            meta["output_spec"] = self.output_spec.model_dump(mode="json", by_alias=True)
+            meta["structured_schema"] = self.output_spec.schema_
+            meta["output_max_retries"] = self.max_output_retries
         if self.response_model is not None:
             meta["structured_schema"] = self.response_model.model_json_schema()
             meta["output_max_retries"] = self.max_output_retries
@@ -305,11 +436,15 @@ class AgentRunner:
         termination_reason = None
         yield self._event("run_start", data={"resumed": bool(resume), "input": user_input})
         try:
+            for middleware in self.middleware.middlewares:
+                hook = getattr(middleware, "before_run", None)
+                if hook:
+                    await hook(self._ctx())
             while meta["step_index"] < self.session.max_steps:
                 ctx = self._ctx()
                 if not pending:
                     ctx = await self._in_context(ctx, self.middleware.execute_before_llm, ctx)
-                    if meta.get("structured_schema"):
+                    if meta.get("structured_schema") and self.output_spec is None:
                         from wuwei.core.message import SystemMessage
 
                         ctx.state.messages.insert(
@@ -326,6 +461,7 @@ class AgentRunner:
                     start = time.monotonic()
                     call_usage = _empty_usage()
                     content = []
+                    content_parts = []
                     reasoning = []
                     provider_meta = {}
                     finish = None
@@ -333,7 +469,14 @@ class AgentRunner:
                     usage_available = False
 
                     async def invoke(messages, tools):
-                        return await self.llm.generate(messages, tools=tools, stream=stream)
+                        kwargs = (
+                            {"output_spec": self.output_spec}
+                            if self.output_spec is not None
+                            else {}
+                        )
+                        return await self.llm.generate(
+                            messages, tools=tools, stream=stream, **kwargs
+                        )
 
                     result = await self._in_context(
                         ctx,
@@ -346,6 +489,7 @@ class AgentRunner:
                     if isinstance(result, LLMResponse):
                         usage_available = result.usage_available
                         content.append(result.message.content or "")
+                        content_parts.extend(getattr(result.message, "content_parts", []) or [])
                         reasoning.append(result.message.reasoning_content or "")
                         pending = result.message.tool_calls or []
                         provider_meta.update(result.message.metadata)
@@ -360,6 +504,8 @@ class AgentRunner:
                                     or getattr(chunk, "usage_available", False)
                                     or any((chunk.usage or {}).values())
                                 )
+                                if getattr(chunk, "content_parts", None):
+                                    content_parts = list(chunk.content_parts)
                                 if chunk.content:
                                     content.append(chunk.content)
                                     yield self._event("text_delta", data={"content": chunk.content})
@@ -379,13 +525,36 @@ class AgentRunner:
                             close = getattr(result, "aclose", None)
                             if close:
                                 await close()
+                    if self.output_spec is not None:
+                        from wuwei.llm.output import STRUCTURED_TOOL_NAME
+
+                        structured_calls = [
+                            tc for tc in pending if tc.function.name == STRUCTURED_TOOL_NAME
+                        ]
+                        if structured_calls:
+                            if len(structured_calls) != 1 or len(pending) != 1:
+                                raise ValueError("Structured output must be the only tool call")
+                            content = [
+                                json.dumps(
+                                    structured_calls[0].function.arguments, ensure_ascii=False
+                                )
+                            ]
+                            pending = []
+                            finish = "stop"
                     latency = int((time.monotonic() - start) * 1000)
                     self._charge_usage(call_usage, latency, model, usage_available)
                     ai_msg = AIMessage(
                         content="".join(content),
                         reasoning_content="".join(reasoning) or None,
                         tool_calls=pending,
-                        metadata=provider_meta,
+                        metadata={
+                            **provider_meta,
+                            "usage_available": usage_available,
+                            "model": model,
+                            "provider": getattr(self.llm, "provider", ""),
+                        },
+                        usage=call_usage,
+                        content_parts=content_parts,
                     )
                     # Store the full provider reasoning representation before later replay.
                     self.session.context.get_messages().append(ai_msg)
@@ -410,6 +579,12 @@ class AgentRunner:
                         data={"tool_calls": [tc.model_dump(mode="json") for tc in pending]},
                     )
                     final_content = ai_msg.content
+                    if provider_meta.get("refusal"):
+                        pending = []
+                        status = "incomplete"
+                        termination_reason = "refusal"
+                        meta["step_index"] += 1
+                        break
                     if finish not in ("stop", "tool_calls"):
                         pending = []  # No partial tools execute on length/abort/unknown.
                         status = (
@@ -502,8 +677,14 @@ class AgentRunner:
         except (asyncio.CancelledError, GeneratorExit):
             self._block_uncertain_tools()
             await self._close_background_tasks()
-            await self._close_resources()
             meta["status"] = "cancelled"
+            for middleware in reversed(self.middleware.middlewares):
+                hook = getattr(middleware, "after_run", None)
+                if hook:
+                    await hook(
+                        self._ctx(), {"status": "cancelled", "termination_reason": "cancelled"}
+                    )
+            await self._close_resources()
             self._set_session_run_stats()
             # Persist the last running tool marker; recovery must reconcile it, not replay it.
             await self._save_checkpoint(kind="cancelled")
@@ -511,11 +692,11 @@ class AgentRunner:
         except Exception as exc:
             self._block_uncertain_tools()
             await self._close_background_tasks()
-            await self._close_resources()
             meta["status"] = "error"
             self._set_session_run_stats()
             ctx = self._ctx()
             await self._in_context(ctx, self.middleware.execute_on_error, ctx, exc)
+            await self._close_resources()
             await self._save_checkpoint(kind="error")
             yield self._event(
                 "error",
@@ -538,7 +719,6 @@ class AgentRunner:
 
     async def _finish(self, content, status, termination_reason=None, interrupt=None):
         await self._close_background_tasks()
-        await self._close_resources()
         if self._metadata.get("unknown_tool"):
             status = "unknown"
             termination_reason = "tool_outcome_unknown"
@@ -550,8 +730,16 @@ class AgentRunner:
         if status != "interrupted":
             self.session.metadata.pop("_pending_interrupt", None)
             await self._save_checkpoint(kind="final")
+        last_model = next(
+            (m for m in reversed(self.session.context.get_messages()) if m.role == "assistant"),
+            None,
+        )
+        final_parts = getattr(last_model, "content_parts", []) if last_model is not None else []
+        final_metadata = dict(getattr(last_model, "metadata", {}) or {})
         data = dict(
             content=content,
+            content_parts=[part.model_dump(mode="json") for part in final_parts],
+            metadata=final_metadata,
             usage=dict(self._metadata["usage_total"]),
             latency_ms=self._metadata["latency_ms"],
             llm_calls=self._metadata["llm_calls"],
@@ -561,10 +749,16 @@ class AgentRunner:
             usage_available=self._metadata.get("usage_available", True),
             output=self._metadata.get("structured_output"),
         )
+        for middleware in reversed(self.middleware.middlewares):
+            hook = getattr(middleware, "after_run", None)
+            if hook:
+                await hook(self._ctx(), data)
+        await self._close_resources()
         yield self._event("done", data=dict(data))
         yield self._event("run_end", data=dict(data))
 
     async def _run_tool_phase(self, *, ctx, tool_calls):
+        self._metadata["unresolved_calls"] = [tc.model_dump(mode="json") for tc in tool_calls]
         # Batches only cross tools with no before/after hooks. Guards that depend on a
         # previous result must run after that result, not before an entire batch.
         can_batch = (
@@ -664,10 +858,9 @@ class AgentRunner:
                     if getattr(nested_result, "role", None) != "tool":
                         nested_result = await self.tool_executor.execute_one(nested_result)
                     nested_result = self._to_core_tool_message(nested_result, nested_tc)
-                    try:
-                        unknown = json.loads(nested_result.content).get("status") == "unknown"
-                    except (ValueError, AttributeError):
-                        unknown = False
+                    unknown = (
+                        nested_result.metadata.get("tool_outcome", {}).get("status") == "unknown"
+                    )
                     if unknown:
                         self._metadata["unknown_tool"] = True
                         raise RuntimeError("Nested tool outcome is unknown; reconcile before retry")
@@ -698,13 +891,16 @@ class AgentRunner:
         final = self._to_core_tool_message(msg, tc)
         final = await self._in_context(ctx, self.middleware.execute_after_tool, ctx, final)
         final = self._to_core_tool_message(final, tc)
+        final.metadata.setdefault("tool_outcome", {"status": final.status, "executed": False})
         self.session.context.get_messages().append(final)
-        unknown = (
-            final.metadata.get("status") == "unknown" or '"status": "unknown"' in final.content
-        )
+        unknown = final.metadata.get("tool_outcome", {}).get("status") == "unknown"
         self._metadata["tool_states"][tc.id] = "unknown" if unknown else final.status
         if unknown:
             self._metadata["unknown_tool"] = True
+        else:
+            self._metadata["unresolved_calls"] = [
+                c for c in self._metadata.get("unresolved_calls", []) if c["id"] != tc.id
+            ]
         self._metadata["approval_decisions"].pop(tc.id, None)
         self._metadata.get("batch_results", {}).pop(tc.id, None)
         get_or_create_log(self.session).append(
@@ -750,11 +946,8 @@ class AgentRunner:
         if isinstance(msg, ToolMessage):
             return msg
         content = getattr(msg, "content", "") or ""
-        status = (
-            "error"
-            if ('"ok": false' in content.lower() or '"ok":false' in content.lower())
-            else "success"
-        )
+        outcome = (getattr(msg, "metadata", {}) or {}).get("tool_outcome", {})
+        status = "error" if outcome.get("status") in ("error", "unknown") else "success"
         return ToolMessage(
             content=content,
             tool_call_id=getattr(msg, "tool_call_id", None) or tc.id,

@@ -35,6 +35,10 @@ class BaseCheckpointer(ABC):
         """Atomically consume the current continuation, or fail closed on old backends."""
         raise NotImplementedError("This checkpointer must implement atomic claim() for resume")
 
+    async def replace_current(self, checkpoint_id: str, state: State, *, metadata: dict) -> str:
+        """Consume and replace one current checkpoint in a single transaction."""
+        raise NotImplementedError("Atomic replacement is required for reconciliation")
+
     async def put_writes(self, checkpoint_id: str, writes: list[dict], task_id: str) -> None:
         pass
 
@@ -95,6 +99,30 @@ class MemoryCheckpointer(BaseCheckpointer):
             return False
         self._claims.add(checkpoint_id)
         return True
+
+    async def replace_current(self, checkpoint_id, state, *, metadata):
+        # Serialize before consuming so invalid payloads leave the old state usable.
+        snapshot = json.loads(json.dumps(state.to_dict(), ensure_ascii=False))
+        meta = json.loads(json.dumps(metadata, ensure_ascii=False))
+        record = self.checkpoints.get(checkpoint_id)
+        if record is None or checkpoint_id in self._claims:
+            raise ValueError("Checkpoint was already consumed or does not exist")
+        run_id = record["metadata"].get("run_id")
+        if run_id and self._heads.get(run_id) != checkpoint_id:
+            raise ValueError("Checkpoint was superseded")
+        if meta.get("run_id") != run_id:
+            raise ValueError("Replacement must belong to the same run")
+        cid = _generate_checkpoint_id()
+        self.checkpoints[cid] = {
+            "state": snapshot,
+            "metadata": meta,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "parent_checkpoint_id": checkpoint_id,
+        }
+        self._claims.add(checkpoint_id)
+        if run_id:
+            self._heads[run_id] = cid
+        return cid
 
     async def put_writes(self, checkpoint_id, writes, task_id):
         self._writes.setdefault(checkpoint_id, []).extend(writes)
@@ -209,6 +237,43 @@ class SQLiteCheckpointer(BaseCheckpointer):
                 return cursor.rowcount == 1
 
         return await asyncio.to_thread(consume)
+
+    async def replace_current(self, checkpoint_id, state, *, metadata):
+        snapshot = json.dumps(state.to_dict(), ensure_ascii=False)
+        meta_json = json.dumps(metadata, ensure_ascii=False)
+        cid = _generate_checkpoint_id()
+
+        def replace():
+            with sqlite3.connect(self.db_path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                record = db.execute(
+                    "SELECT metadata FROM checkpoints WHERE id=?", (checkpoint_id,)
+                ).fetchone()
+                if record is None:
+                    raise ValueError("Checkpoint does not exist")
+                run_id = json.loads(record[0]).get("run_id")
+                if metadata.get("run_id") != run_id:
+                    raise ValueError("Replacement must belong to the same run")
+                if run_id:
+                    head = db.execute(
+                        "SELECT checkpoint_id FROM run_heads WHERE run_id=?", (run_id,)
+                    ).fetchone()
+                    if head and head[0] != checkpoint_id:
+                        raise ValueError("Checkpoint was superseded")
+                used = db.execute(
+                    "INSERT OR IGNORE INTO checkpoint_claims VALUES (?)", (checkpoint_id,)
+                )
+                if used.rowcount != 1:
+                    raise ValueError("Checkpoint was already consumed")
+                db.execute(
+                    "INSERT INTO checkpoints (id,state,metadata,parent_checkpoint_id,created_at) VALUES (?,?,?,?,?)",
+                    (cid, snapshot, meta_json, checkpoint_id, datetime.now(UTC).isoformat()),
+                )
+                if run_id:
+                    db.execute("INSERT OR REPLACE INTO run_heads VALUES (?,?)", (run_id, cid))
+            return cid
+
+        return await asyncio.to_thread(replace)
 
     async def put_writes(self, checkpoint_id, writes, task_id):
         payload = json.dumps(writes, ensure_ascii=False)

@@ -146,15 +146,18 @@ async def run_shell(
     import asyncio
     import time
 
+    from wuwei.sandbox.process import communicate, process_options
+
     start = time.monotonic()
     try:
         process = await asyncio.create_subprocess_shell(
             command,
+            **process_options(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        stdout, stderr = await communicate(process, timeout=timeout)
         return SandboxResult(
             success=process.returncode == 0,
             output=stdout.decode(errors="replace"),

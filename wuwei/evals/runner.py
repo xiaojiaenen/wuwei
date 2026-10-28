@@ -24,24 +24,37 @@ def _strip_code_fences(text: str) -> str:
     return t.strip()
 
 
-def extract_tool_calls(session: Any) -> list[str]:
-    """从会话消息历史提取实际调用的工具名序列。
+def extract_tool_trajectories(session: Any) -> dict[str, list[str]]:
+    """Requests are intentions; committed tool messages are execution evidence."""
+    result = {"requested": [], "executed": [], "succeeded": []}
+    calls = {}
+    messages = session.context.get_messages()
+    for message in messages:
+        if getattr(message, "role", None) == "assistant":
+            for call in getattr(message, "tool_calls", None) or []:
+                calls[call.id] = call.function.name
+                result["requested"].append(call.function.name)
+    for message in messages:
+        if getattr(message, "role", None) != "tool":
+            continue
+        name = getattr(message, "name", None) or calls.get(getattr(message, "tool_call_id", None))
+        if not name:
+            continue
+        metadata = getattr(message, "metadata", {}) or {}
+        outcome = metadata.get("outcome") or metadata.get("tool_outcome") or {}
+        if hasattr(outcome, "model_dump"):
+            outcome = outcome.model_dump()
+        status = outcome.get("status", getattr(message, "status", "unknown"))
+        if outcome.get("executed", status not in {"denied", "rejected", "blocked", "skipped"}):
+            result["executed"].append(name)
+        if status == "success":
+            result["succeeded"].append(name)
+    return result
 
-    优先取 assistant 消息的 tool_calls.function.name；
-    若整个历史没有 assistant.tool_calls（部分适配器不回填），
-    则回退到 role=tool 消息的 name 字段。
-    """
-    names: list[str] = []
-    for m in session.context.get_messages():
-        if getattr(m, "role", None) == "assistant":
-            for tc in getattr(m, "tool_calls", None) or []:
-                names.append(tc.function.name)
-    if names:
-        return names
-    for m in session.context.get_messages():
-        if getattr(m, "role", None) == "tool" and getattr(m, "name", None):
-            names.append(m.name)
-    return names
+
+def extract_tool_calls(session: Any) -> list[str]:
+    """Return committed successful calls (not assistant intentions)."""
+    return extract_tool_trajectories(session)["succeeded"]
 
 
 class EvalRunner:
@@ -68,12 +81,54 @@ class EvalRunner:
         return EvalReport(dataset_name=dataset.name, results=results)
 
     async def run_case(self, case: EvalCase) -> EvalResult:
-        agent = self.agent_factory()
+        agent, result = None, None
+        try:
+            agent = self.agent_factory()
+            result = await self._run_case(agent, case)
+        except Exception as exc:
+            result = EvalResult(
+                case_name=case.name,
+                status="error",
+                passed=False,
+                error=repr(exc),
+                termination_reason="evaluation_setup_error",
+            )
+        finally:
+            close = getattr(agent, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception as exc:
+                    if result is not None:
+                        result.passed = False
+                        result.assertions.append(
+                            AssertionResult(
+                                kind="lifecycle",
+                                name="agent.aclose",
+                                passed=False,
+                                message=f"Agent cleanup failed: {type(exc).__name__}",
+                            )
+                        )
+        return result
+
+    async def _run_case(self, agent, case: EvalCase) -> EvalResult:
         session = self._make_session(agent, case)
 
         start = time.monotonic()
         try:
-            run_result = await agent.run(case.input, session=session)
+            usage = {}
+            usage_available = True
+            for turn in [case.input, *case.turns]:
+                run_result = await agent.run(turn, session=session)
+                turn_usage = getattr(run_result, "usage", None)
+                usage_available = usage_available and getattr(
+                    run_result, "usage_available", bool(turn_usage)
+                )
+                for key, value in (turn_usage or {}).items():
+                    if isinstance(value, (int, float)):
+                        usage[key] = usage.get(key, 0) + value
+                if getattr(run_result, "status", "unknown") != "completed":
+                    break
         except Exception as e:  # noqa: BLE001 - 评估不应被单用例异常炸穿
             latency = int((time.monotonic() - start) * 1000)
             return EvalResult(
@@ -86,19 +141,64 @@ class EvalRunner:
                 ],
                 latency_ms=latency,
                 error=repr(e),
+                status="error",
+                termination_reason="agent_exception",
+                usage_available=False,
             )
 
         latency = int((time.monotonic() - start) * 1000)
         content = getattr(run_result, "content", "") or ""
-        usage = dict(getattr(run_result, "usage", None) or {})
-        actual_tools = extract_tool_calls(session)
+        trajectories = extract_tool_trajectories(session)
+        actual_tools = trajectories[case.tool_trajectory]
+        status = getattr(run_result, "status", "unknown")
 
         assertions: list[AssertionResult] = []
+        configured = any(
+            (
+                case.expected_tool_calls,
+                case.forbidden_tool_calls,
+                case.response_contains,
+                case.response_not_contains,
+                case.response_model,
+                case.rubric,
+                case.max_tokens is not None,
+                case.max_cost is not None,
+                case.max_latency_ms is not None,
+            )
+        )
+        if not configured and not case.allow_empty_assertions:
+            assertions.append(
+                AssertionResult(
+                    kind="configuration", name="assertions", message="No assertions configured"
+                )
+            )
+        for name, limit, value in (
+            ("tokens", case.max_tokens, usage.get("total_tokens") if usage_available else None),
+            ("cost", case.max_cost, usage.get("cost", usage.get("estimated_cost"))),
+            ("latency_ms", case.max_latency_ms, latency),
+        ):
+            if limit is not None:
+                assertions.append(
+                    AssertionResult(
+                        kind="limit",
+                        name=name,
+                        passed=value is not None and value <= limit,
+                        message=f"{name}: {value!r} <= {limit}",
+                    )
+                )
         assertions.extend(self._check_tool_calls(case, actual_tools))
         assertions.extend(self._check_content(case, content))
         assertions.append(await self._check_response_model(case, content))
         assertions.append(await self._check_rubric(case, content))
 
+        assertions.append(
+            AssertionResult(
+                kind="status",
+                name=case.expected_status,
+                passed=status == case.expected_status,
+                message=f"expected {case.expected_status}, actual {status}",
+            )
+        )
         passed = all(a.passed for a in assertions if not a.skipped)
         return EvalResult(
             case_name=case.name,
@@ -108,6 +208,12 @@ class EvalRunner:
             latency_ms=latency,
             output=content,
             tool_calls=actual_tools,
+            tool_trajectories=trajectories,
+            status=status,
+            termination_reason=getattr(run_result, "termination_reason", None),
+            usage_available=usage_available,
+            skipped=any(a.skipped and a.kind == "rubric" and a.name != "-" for a in assertions)
+            and passed,
         )
 
     # ── 会话 ─────────────────────────────────────────────────────────
@@ -235,9 +341,9 @@ class EvalRunner:
             return AssertionResult(
                 kind="rubric",
                 name=case.rubric[:80],
-                passed=True,
-                skipped=True,
-                message="未提供 judge，跳过 rubric 评估",
+                passed=not case.judge_required,
+                skipped=not case.judge_required,
+                message="未提供 judge",
             )
         try:
             score, explanation = await self.judge(case.input, content, case.rubric)

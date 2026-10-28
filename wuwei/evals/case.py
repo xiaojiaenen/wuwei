@@ -1,6 +1,6 @@
 """评估用例与结果模型。"""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -38,7 +38,7 @@ def import_from_string(path: str) -> Any:
 class AssertionResult(BaseModel):
     """单条断言的结果。"""
 
-    kind: str  # expected_tool_calls / forbidden_tool_calls / contains / not_contains / response_model / rubric
+    kind: str  # status / trajectory / content / schema / rubric / limits
     name: str  # 断言的具体内容（如工具名、子串、模型路径）
     passed: bool = False
     message: str = ""
@@ -53,6 +53,15 @@ class EvalCase(BaseModel):
 
     name: str
     input: str
+
+    turns: list[str] = Field(default_factory=list)
+    expected_status: str = "completed"
+    allow_empty_assertions: bool = False
+    judge_required: bool = True
+    tool_trajectory: Literal["requested", "executed", "succeeded"] = "succeeded"
+    max_tokens: int | None = Field(default=None, ge=0)
+    max_cost: float | None = Field(default=None, ge=0)
+    max_latency_ms: int | None = Field(default=None, ge=0)
 
     # ── 轨迹断言 ──────────────────────────────────────────────────────
     expected_tool_calls: list[str] = Field(default_factory=list)  # 必须都出现
@@ -87,7 +96,12 @@ class EvalResult(BaseModel):
     case_name: str
     passed: bool = False
     assertions: list[AssertionResult] = Field(default_factory=list)
-    usage: dict[str, int] = Field(
+    status: str = "unknown"
+    termination_reason: str | None = None
+    usage_available: bool = False
+    skipped: bool = False
+    tool_trajectories: dict[str, list[str]] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(
         default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     )
     latency_ms: int = 0

@@ -64,18 +64,41 @@ class Tool(BaseModel):
             raise ValueError("Tool arguments must be an object")
         # Validate the public JSON contract before any handler side effects.
         from jsonschema import validate, ValidationError
+
         try:
             validate(args, self.parameters.to_schema())
         except ValidationError as exc:
             raise ValueError(f"Invalid tool arguments: {exc.message}") from exc
-        inspect.signature(self.handler).bind(**args)
         hints = get_type_hints(self.handler)
+        from typing import get_origin
+        from wuwei.runtime.contracts import RunContext
+        from wuwei.runtime.context import current_context
+
+        injected = {
+            key
+            for key, hint in hints.items()
+            if hint is RunContext or get_origin(hint) is RunContext
+        }
+        if injected.intersection(args):
+            raise ValueError("Injected context cannot be supplied by model arguments")
+        args = dict(args)
+        for key in injected:
+            active = current_context.get()
+            context = active.config.get("run_context") if active else None
+            if context is None:
+                raise ValueError("Tool requires an active RunContext")
+            args[key] = context
+        inspect.signature(self.handler).bind(**args)
         for key, value in args.items():
-            if key in hints:
+            if key in hints and key not in injected:
                 TypeAdapter(hints[key]).validate_python(value, strict=True)
-        if inspect.iscoroutinefunction(self.handler):
-            return await self.handler(**args)
-        result = await asyncio.to_thread(self.handler, **args)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        try:
+            if inspect.iscoroutinefunction(self.handler):
+                return await self.handler(**args)
+            result = await asyncio.to_thread(self.handler, **args)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except Exception as exc:
+            exc._wuwei_tool_executed = True
+            raise

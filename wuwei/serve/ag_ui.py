@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import inspect
-import json
+from wuwei.core.serialization import wire_json_dumps
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -156,7 +156,7 @@ def map_agent_event(event: Any, state: _EventState) -> list[dict[str, Any]]:
                 {
                     "type": TOOL_CALL_ARGS,
                     "toolCallId": tool_call_id,
-                    "delta": args if isinstance(args, str) else json.dumps(args, ensure_ascii=False),
+                    "delta": args if isinstance(args, str) else wire_json_dumps(args),
                 }
             )
 
@@ -170,30 +170,35 @@ def map_agent_event(event: Any, state: _EventState) -> list[dict[str, Any]]:
                     "type": TOOL_CALL_RESULT,
                     "messageId": _new_id("msg"),
                     "toolCallId": tool_call_id,
-                    "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                    "content": output if isinstance(output, str) else wire_json_dumps(output),
                     "role": "tool",
                 }
             )
 
     elif event_type == "approval_required":
         # AG-UI 无原生审批事件，用 CUSTOM 承载
-        out.append(
-            {"type": CUSTOM, "name": "approval_required", "value": _get(event, "data", {})}
-        )
+        out.append({"type": CUSTOM, "name": "approval_required", "value": _get(event, "data", {})})
 
     elif event_type in ("done", "run_end"):
         close = state.close_text_message()
         if close:
             out.append(close)
         if state.reasoning_message_id is not None:
-            out.append(
-                {"type": REASONING_MESSAGE_END, "messageId": state.reasoning_message_id}
-            )
+            out.append({"type": REASONING_MESSAGE_END, "messageId": state.reasoning_message_id})
             state.reasoning_message_id = None
         usage = _data_get(event, "usage") or {}
         state.usage = dict(usage) if isinstance(usage, dict) else {}
-        if event_type == "run_end" and _data_get(event, "status", "completed") not in ("completed", "interrupted"):
-            out.append({"type": RUN_ERROR, "message": str(_data_get(event, "content") or "Agent did not complete"), "code": str(_data_get(event, "status"))})
+        if event_type == "run_end" and _data_get(event, "status", "completed") not in (
+            "completed",
+            "interrupted",
+        ):
+            out.append(
+                {
+                    "type": RUN_ERROR,
+                    "message": str(_data_get(event, "content") or "Agent did not complete"),
+                    "code": str(_data_get(event, "status")),
+                }
+            )
         elif event_type == "run_end":
             finished: dict[str, Any] = {
                 "type": RUN_FINISHED,
@@ -262,7 +267,12 @@ async def ag_ui_events(
         emitted_terminal = False
         try:
             parameters = inspect.signature(stream_events).parameters
-            kwargs = {"session_id": thread_id} if "session_id" in parameters or any(p.kind == p.VAR_KEYWORD for p in parameters.values()) else {}
+            kwargs = (
+                {"session_id": thread_id}
+                if "session_id" in parameters
+                or any(p.kind == p.VAR_KEYWORD for p in parameters.values())
+                else {}
+            )
             stream = stream_events(user_input, **kwargs)
             async for event in stream:
                 for mapped in map_agent_event(event, state):
@@ -272,7 +282,11 @@ async def ag_ui_events(
                     if mapped["type"] == RUN_ERROR:
                         return
             if not emitted_terminal:
-                yield {"type": RUN_ERROR, "message": "Agent stream ended without terminal event", "code": "IncompleteStream"}
+                yield {
+                    "type": RUN_ERROR,
+                    "message": "Agent stream ended without terminal event",
+                    "code": "IncompleteStream",
+                }
         except Exception as exc:
             yield {"type": RUN_ERROR, "message": str(exc), "code": type(exc).__name__}
         finally:
@@ -302,7 +316,11 @@ async def ag_ui_events(
     if status == "interrupted":
         yield {"type": CUSTOM, "name": "approval_required", "value": _get(result, "interrupt", {})}
     elif status != "completed":
-        yield {"type": RUN_ERROR, "message": content or "Agent did not complete", "code": str(status)}
+        yield {
+            "type": RUN_ERROR,
+            "message": content or "Agent did not complete",
+            "code": str(status),
+        }
         return
     message_id = _new_id("msg")
     yield {"type": TEXT_MESSAGE_START, "messageId": message_id, "role": "assistant"}
@@ -325,7 +343,7 @@ async def ag_ui_events(
 
 
 def _sse_bytes(event: dict[str, Any]) -> str:
-    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    return f"data: {wire_json_dumps(event)}\n\n"
 
 
 async def _stream_response(
@@ -340,7 +358,7 @@ async def _stream_response(
             if sse:
                 yield _sse_bytes(event)
             else:
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+                yield wire_json_dumps(event) + "\n"
 
     if sse:
         return Response(
@@ -377,7 +395,10 @@ def build_ag_ui_app(agent: Any, *, name: str = "wuwei-agent"):
         if not user_input.strip():
             raise HTTPError(
                 400,
-                {"type": RUN_ERROR, "message": "messages must contain a user message with non-empty content"},
+                {
+                    "type": RUN_ERROR,
+                    "message": "messages must contain a user message with non-empty content",
+                },
             )
         accept = (request.headers.get("accept") or "").lower()
         fmt = request.query.get("format", "").lower()

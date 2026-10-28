@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel
 
 from wuwei.core.message import FunctionCall, ToolCall
 from wuwei.evals import (
@@ -75,6 +74,7 @@ class FakeAgent:
             ctx.add_ai_message("", tool_calls=tcs)
             for tc in tcs:
                 ctx.add_tool_message("ok", tool_call_id=tc.id)
+                ctx.get_messages()[-1].metadata["tool_outcome"] = {"status": "success"}
         ctx.add_ai_message(self.content)
         return AgentRunResult(
             content=self.content,
@@ -254,9 +254,7 @@ class TestTrajectoryAssertions:
         bad_case = EvalCase(name="bad", input="q", forbidden_tool_calls=["rm_rf"])
         bad = await make_runner(agent).run_case(bad_case)
         assert not bad.passed
-        assert any(
-            a.kind == "forbidden_tool_calls" and not a.passed for a in bad.assertions
-        )
+        assert any(a.kind == "forbidden_tool_calls" and not a.passed for a in bad.assertions)
 
     @pytest.mark.asyncio
     async def test_extract_tool_calls_from_tool_messages_fallback(self):
@@ -265,6 +263,7 @@ class TestTrajectoryAssertions:
         session.context.add_user_message("hi")
         session.context.add_tool_message("result", tool_call_id="x")
         session.context.get_messages()[-1].name = "fallback_tool"
+        session.context.get_messages()[-1].metadata["tool_outcome"] = {"status": "success"}
         assert extract_tool_calls(session) == ["fallback_tool"]
 
     @pytest.mark.asyncio
@@ -280,7 +279,10 @@ class TestTrajectoryAssertions:
 
         runner = EvalRunner(agent_factory=factory)
         ds = Dataset(
-            cases=[EvalCase(name="a", input="1"), EvalCase(name="b", input="2")]
+            cases=[
+                EvalCase(name="a", input="1", allow_empty_assertions=True),
+                EvalCase(name="b", input="2", allow_empty_assertions=True),
+            ]
         )
         report = await runner.run(ds)
         assert len(created) == 2
@@ -414,7 +416,7 @@ class TestRubric:
     async def test_rubric_skipped_without_judge(self):
         agent = FakeAgent(content="任意")
         result = await make_runner(agent, judge=None).run_case(
-            EvalCase(name="t", input="q", rubric="切题")
+            EvalCase(name="t", input="q", rubric="切题", judge_required=False)
         )
         assert result.passed  # skipped 不算失败
         skipped = [a for a in result.assertions if a.kind == "rubric"]
@@ -451,7 +453,9 @@ class TestRunnerMisc:
     @pytest.mark.asyncio
     async def test_case_without_assertions_passes(self):
         agent = FakeAgent(content="hi")
-        result = await make_runner(agent).run_case(EvalCase(name="t", input="q"))
+        result = await make_runner(agent).run_case(
+            EvalCase(name="t", input="q", allow_empty_assertions=True)
+        )
         assert result.passed
 
     @pytest.mark.asyncio
@@ -469,7 +473,7 @@ class TestRunnerMisc:
             )
         )
         assert result.passed
-        kinds = {a.kind for a in result.assertions if not a.skipped}
+        kinds = {a.kind for a in result.assertions if not a.skipped and a.kind != "status"}
         assert kinds == {
             "expected_tool_calls",
             "forbidden_tool_calls",
@@ -610,6 +614,7 @@ class TestCli:
             "            ctx.add_ai_message('', tool_calls=tcs)\n"
             "            for tc in tcs:\n"
             "                ctx.add_tool_message('ok', tool_call_id=tc.id)\n"
+            "                ctx.get_messages()[-1].metadata['tool_outcome'] = {'status': 'success'}\n"
             "        ctx.add_ai_message(self.content)\n"
             "        return AgentRunResult(content=self.content,\n"
             "                              usage={'total_tokens': 10}, latency_ms=3)\n"
@@ -620,9 +625,7 @@ class TestCli:
         )
 
     def test_cli_pass_exit_0(self, tmp_path, monkeypatch):
-        ds = _write_dataset(
-            tmp_path, expected_tool_calls=["calc"], response_contains=["4"]
-        )
+        ds = _write_dataset(tmp_path, expected_tool_calls=["calc"], response_contains=["4"])
         mod_dir = tmp_path / "mods"
         mod_dir.mkdir()
         self._make_fake_module(mod_dir, ["calc"], "答案是 4")

@@ -82,13 +82,22 @@ class ToolRegistry:
                 tool_parameters = parameters
             else:
                 from pydantic import create_model
+
                 sig = inspect.signature(func)
                 hints = get_type_hints(func)
                 fields = {}
                 for key, param in sig.parameters.items():
                     if key == "self" or param.kind in (param.VAR_KEYWORD, param.VAR_POSITIONAL):
                         continue
-                    fields[key] = (hints.get(key, Any), ... if param.default is inspect.Parameter.empty else param.default)
+                    from wuwei.runtime.contracts import RunContext
+                    from typing import get_origin
+
+                    if hints.get(key) is RunContext or get_origin(hints.get(key)) is RunContext:
+                        continue
+                    fields[key] = (
+                        hints.get(key, Any),
+                        ... if param.default is inspect.Parameter.empty else param.default,
+                    )
                 schema = create_model(f"{tool_name}Arguments", **fields).model_json_schema()
                 schema.pop("title", None)
                 tool_parameters = ToolParameters.model_validate(schema)

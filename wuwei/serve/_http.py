@@ -8,6 +8,8 @@ wuwei/serve 下的 A2A 与 AG-UI HTTP 出口共用这一层：
 from __future__ import annotations
 
 import json
+
+from wuwei.core.serialization import wire_json_dumps
 from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable
 
@@ -40,8 +42,7 @@ class Request:
         self.method: str = scope.get("method", "GET").upper()
         self.path: str = scope.get("path", "/")
         self.headers: dict[str, str] = {
-            k.decode("latin-1").lower(): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
         }
         self.query: dict[str, str] = {}
         for chunk in (scope.get("query_string") or b"").decode("latin-1").split("&"):
@@ -98,7 +99,7 @@ class Response:
 
 def json_response(payload: Any, *, status: int = 200) -> Response:
     return Response(
-        json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        wire_json_dumps(payload).encode("utf-8"),
         status=status,
     )
 
@@ -143,9 +144,7 @@ def make_asgi_app(routes: dict[tuple[str, str], Handler], *, name: str = "app"):
         except HTTPError as exc:
             response = json_response(exc.payload, status=exc.status)
         except Exception as exc:  # noqa: BLE001 —— 兜底映射为 500
-            response = json_response(
-                {"error": f"{type(exc).__name__}: {exc}"}, status=500
-            )
+            response = json_response({"error": f"{type(exc).__name__}: {exc}"}, status=500)
 
         headers = [
             (b"content-type", response.content_type.encode("latin-1")),

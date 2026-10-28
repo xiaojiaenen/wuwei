@@ -51,6 +51,11 @@ class SubAgent:
     model: Any | None = None
     max_steps: int = 10
     middleware: list[Middleware] | None = None
+    input_model: Any | None = None
+    output_model: Any | None = None
+    context_keys: tuple[str, ...] = ()
+    artifact_keys: tuple[str, ...] = ()
+    inherit_deps: bool = False
 
     def to_tool_schema(self) -> dict:
         """生成 task 工具的 OpenAI function schema"""
@@ -177,7 +182,9 @@ class SubAgentMiddleware(Middleware):
             signal.continuation = continuation
             raise signal
         delegations.pop(tc_id, None)
-        result_msg = ToolMessage(content=result, tool_call_id=tc_id, name=tool_name)
+        from wuwei.tools.outcome import ToolOutcome
+
+        result_msg = ToolOutcome.from_delegation(payload).to_message(tc_id, tool_name)
         # 确保 tool_call_id 匹配 LLM 的 tool call
         result_msg.tool_call_id = tc_id
         return result_msg
@@ -223,11 +230,9 @@ class SubAgentMiddleware(Middleware):
         # 构建子代理图
         result = await self._run_sub_agent(sub_agent, task_description, llm, ctx=ctx)
 
-        return ToolMessage(
-            content=result,
-            tool_call_id=tool_name,  # placeholder, will be overridden by caller
-            name=tool_name,
-        )
+        from wuwei.tools.outcome import ToolOutcome
+
+        return ToolOutcome.from_delegation(json.loads(result)).to_message(tool_name, tool_name)
 
     async def _run_sub_agent(
         self,
@@ -241,7 +246,50 @@ class SubAgentMiddleware(Middleware):
         from wuwei.agent.agent import Agent
         from wuwei.runtime.context import current_context
 
+        from wuwei.runtime.handoff import DelegationInput
+
         parent = ctx or current_context.get()
+        if sub_agent.input_model is not None:
+            validated = sub_agent.input_model.model_validate_json(task)
+            task = validated.model_dump_json()
+        selected = {
+            key: parent.metadata[key]
+            for key in sub_agent.context_keys
+            if parent is not None and key in parent.metadata
+        }
+        import mimetypes
+        from wuwei.artifacts import ArtifactRef
+        from wuwei.core.message import FilePart, HumanMessage, ImagePart
+
+        refs = []
+        for key in sub_agent.artifact_keys if not resume else ():
+            value = parent.metadata.get(key) if parent is not None else None
+            for ref in value if isinstance(value, list) else ([] if value is None else [value]):
+                refs.append(ArtifactRef.model_validate(ref))
+        if selected or refs:
+            handoff = DelegationInput(task=task, context=selected, artifact_refs=refs)
+            task = handoff.model_dump_json()
+        if refs:
+            store, owner = (
+                getattr(llm, "artifact_store", None),
+                getattr(llm, "artifact_owner", None),
+            )
+            if store is None or not owner:
+                raise ValueError(
+                    "Delegated artifacts require an authorized ArtifactStore and owner"
+                )
+            parts = []
+            for ref in refs:
+                store.read(ref, owner=owner)  # Validate before handing data to the child.
+                parts.append(
+                    ImagePart(artifact=ref)
+                    if ref.media_type.startswith("image/")
+                    else FilePart(
+                        artifact=ref,
+                        filename=ref.id + (mimetypes.guess_extension(ref.media_type) or ".bin"),
+                    )
+                )
+            task = HumanMessage(task, content_parts=parts)
         config = parent.config if parent is not None else {}
         worker = Agent(
             llm=llm,
@@ -254,6 +302,11 @@ class SubAgentMiddleware(Middleware):
             ),
             checkpointer=config.get("checkpointer"),
             event_bus=config.get("event_bus"),
+            deps=(
+                config["run_context"].deps
+                if sub_agent.inherit_deps and config.get("run_context") is not None
+                else None
+            ),
         )
         session = None if resume else worker.create_session()
         session_id = resume["session_id"] if resume else session.session_id
@@ -267,7 +320,12 @@ class SubAgentMiddleware(Middleware):
                     reason=decision.get("reason", ""),
                 )
             else:
-                result = await worker.run(task, session=session)
+                if sub_agent.output_model is not None:
+                    _, result = await worker.run_structured(
+                        task, sub_agent.output_model, session=session
+                    )
+                else:
+                    result = await worker.run(task, session=session)
         except BaseException as exc:
             stopped = worker._sessions.get(session_id, session)
             exc.child_usage = dict(stopped.last_usage) if stopped else {}
@@ -279,25 +337,36 @@ class SubAgentMiddleware(Middleware):
             )
             raise
         stopped = worker._sessions.get(session_id)
-        return json.dumps(
-            {
-                "sub_agent": sub_agent.name,
-                "result": result.content,
-                "status": result.status,
-                "usage": result.usage,
-                "llm_calls": result.llm_calls,
-                "interrupt": getattr(result, "interrupt", None),
-                "session_id": session_id,
-                "reconciliation": (
-                    {"session_id": session_id, "run_id": stopped.metadata["_blocked_run"]}
-                    if stopped and stopped.metadata.get("_blocked_run")
-                    else None
-                ),
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
-                "steps": getattr(result, "steps", 0),
-            },
-            ensure_ascii=False,
-        )
+        from wuwei.runtime.handoff import DelegationOutput
+
+        payload = {
+            "sub_agent": sub_agent.name,
+            "result": (
+                result.output.model_dump(mode="json")
+                if hasattr(result.output, "model_dump")
+                else result.output
+            )
+            if sub_agent.output_model is not None and result.output is not None
+            else result.content,
+            "artifact_refs": [
+                part.artifact.model_dump(mode="json")
+                for part in result.content_parts
+                if getattr(part, "artifact", None) is not None
+            ],
+            "status": result.status,
+            "usage": result.usage,
+            "llm_calls": result.llm_calls,
+            "interrupt": getattr(result, "interrupt", None),
+            "session_id": session_id,
+            "reconciliation": (
+                {"session_id": session_id, "run_id": stopped.metadata["_blocked_run"]}
+                if stopped and stopped.metadata.get("_blocked_run")
+                else None
+            ),
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "steps": getattr(result, "steps", 0),
+        }
+        return DelegationOutput.model_validate(payload).model_dump_json()
 
 
 def inherit_middleware(parent=None, explicit=None, *, exclude=None):

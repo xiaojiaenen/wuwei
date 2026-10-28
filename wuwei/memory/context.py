@@ -7,9 +7,14 @@ class Context:
     def __init__(self) -> None:
         self._messages: list[Message] = []
 
-    def add_user_message(self, content: str) -> None:
-        """追加一条用户消息。"""
-        self._messages.append(Message(role="user", content=content))
+    def add_user_message(self, content: str | Message) -> None:
+        """Append text or a typed user message, retaining media references."""
+        if isinstance(content, Message):
+            if content.role != "user" or content.tool_calls or content.tool_call_id:
+                raise ValueError("Agent input must be a user message without tool control fields")
+            self._messages.append(content.model_copy(deep=True))
+        else:
+            self._messages.append(Message(role="user", content=content))
 
     def add_system_message(self, content: str) -> None:
         """追加一条 system 消息。"""

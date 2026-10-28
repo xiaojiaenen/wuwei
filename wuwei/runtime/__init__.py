@@ -14,3 +14,8 @@ __all__ = [
     "ActionEntry",
     "ActionLog",
 ]
+
+from wuwei.runtime.contracts import RunContext, RunState
+from wuwei.runtime.handoff import DelegationInput, DelegationOutput
+
+__all__ += ["RunContext", "RunState", "DelegationInput", "DelegationOutput"]

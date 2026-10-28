@@ -30,6 +30,7 @@ memory = []
 sandbox = []  # Local/Docker CLI；E2B 请安装 e2b extra
 
 # 扩展模块
+dbos = ["dbos>=3.3,<4"]  # 可选持久任务调度后端
 mcp = ["mcp>=2.2,<3"]  # MCP 官方 SDK（stdio / streamable http）
 skill = ["python-frontmatter>=1.0"]  # 技能系统
 gateway = ["httpx>=0.25"]  # 多平台网关
@@ -52,7 +53,7 @@ serve = ["mcp>=2.2,<3"]
 
 # 完整安装
 all = [
-    "wuwei[anthropic,mcp,skill,gateway,observability,markitdown,e2b,vectorstore,serve]",
+    "wuwei[anthropic,mcp,skill,gateway,observability,markitdown,e2b,vectorstore,serve,dbos]",
 ]
 
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10", "mkdocs-minify-plugin>=0.8", "mkdocstrings[python]>=0.25"]
@@ -94,4 +95,5 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

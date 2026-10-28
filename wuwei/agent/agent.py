@@ -1,12 +1,13 @@
 """Agent 类 - 使用 Middleware + Plugin 系统"""
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from wuwei.agent.base import BaseSessionAgent
 from wuwei.agent.session import AgentSession
-from wuwei.llm import AgentEvent, LLMGateway
+from wuwei.llm import AgentEvent, LLMGateway, Message
 from wuwei.plugin import Plugin, PluginContext, PluginManager
 from wuwei.plugin.builtin import BUILTIN_GROUPS, load_builtin
 from wuwei.runtime.agent_runner import AgentRunner
@@ -77,6 +78,10 @@ class Agent(BaseSessionAgent):
         load_builtins: bool | str | list[str] = "minimal",
         checkpointer=None,
         event_bus=None,
+        *,
+        session_store=None,
+        deps=None,
+        owns_llm: bool = False,
     ) -> None:
         """初始化 Agent。
 
@@ -137,6 +142,12 @@ class Agent(BaseSessionAgent):
         self._plugin_manager = pm
         self.checkpointer = checkpointer
         self.event_bus = event_bus
+        self.session_store = session_store
+        self.deps = deps
+        self.owns_llm = owns_llm
+        self._store_locks = {}
+        self._closed = False
+        self._active_runs = 0
         # 惰性创建的默认会话：不传 session 时复用它，保证多轮对话历史连续
         self._default_session: AgentSession | None = None
 
@@ -147,7 +158,7 @@ class Agent(BaseSessionAgent):
 
     def create_runner(self, session: AgentSession) -> AgentRunner:
         """为普通 agent 会话创建执行器。"""
-        return AgentRunner(
+        runner = AgentRunner(
             llm=self.llm,
             tools=self.tool_registry.list_tools(),
             tool_executor=self.tool_executor,
@@ -156,10 +167,12 @@ class Agent(BaseSessionAgent):
             checkpointer=self.checkpointer,
             event_bus=self.event_bus,
         )
+        runner.deps = self.deps
+        return runner
 
     async def run(
         self,
-        user_input: str,
+        user_input: str | Message,
         session: AgentSession | None = None,
         stream: bool = False,
     ) -> Any:
@@ -173,12 +186,15 @@ class Agent(BaseSessionAgent):
             if self._default_session is None:
                 self._default_session = self.create_session()
             current_session = self._default_session
-        runner = self.create_runner(current_session)
-        return await runner.run(user_input, stream=stream)
+        if stream:
+            return self.stream_events(user_input, session=current_session)
+        async with self._session_scope(current_session):
+            runner = self.create_runner(current_session)
+            return await runner.run(user_input, stream=False)
 
     def stream_events(
         self,
-        user_input: str,
+        user_input: str | Message,
         session: AgentSession | None = None,
         session_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
@@ -191,8 +207,7 @@ class Agent(BaseSessionAgent):
                 if self._default_session is None:
                     self._default_session = self.create_session()
                 current_session = self._default_session
-        runner = self.create_runner(current_session)
-        return runner.stream_events(user_input)
+        return self._stream_session(user_input, current_session)
 
     async def resume(
         self,
@@ -222,16 +237,19 @@ class Agent(BaseSessionAgent):
                 raise ValueError("Checkpoint does not contain a matching durable session")
             current = AgentSession.from_dict(saved)
             self._sessions[current.session_id] = current
-        runner = self.create_runner(current)
-        return await runner.resume(payload, approved=approved, reason=reason)
+        async with self._session_scope(current):
+            runner = self.create_runner(current)
+            return await runner.resume(payload, approved=approved, reason=reason)
 
     async def run_structured(
         self,
-        user_input: str,
+        user_input: str | Message,
         response_model: type,
         *,
         max_retries: int = 2,
         session: AgentSession | None = None,
+        output_spec=None,
+        output_mode: str = "auto",
     ):
         """Run with validated JSON output through the same tools, guards and budget.
 
@@ -245,17 +263,25 @@ class Agent(BaseSessionAgent):
             if self._default_session is None:
                 self._default_session = self.create_session()
             current = self._default_session
-        runner = self.create_runner(current)
-        runner.response_model = response_model
-        runner.max_output_retries = max_retries
-        result = await runner.run(user_input)
+        if output_spec is None and isinstance(self.llm, LLMGateway):
+            from wuwei.llm.output import OutputSpec
+
+            output_spec = OutputSpec(schema=response_model.model_json_schema(), mode=output_mode)
+        elif output_mode != "auto" and output_spec is None:
+            raise ValueError("Explicit output modes require LLMGateway or an OutputSpec")
+        async with self._session_scope(current):
+            runner = self.create_runner(current)
+            runner.response_model = response_model
+            runner.output_spec = output_spec
+            runner.max_output_retries = max_retries
+            result = await runner.run(user_input)
         output = (
             response_model.model_validate(result.output) if result.status == "completed" else None
         )
         result.output = output
         return output, result
 
-    async def run_plan(
+    async def _run_plan(
         self, goal: str, *, context: str = "", planner=None, session: AgentSession | None = None
     ):
         """Plan and execute in one governed scope, including planner tokens and history.
@@ -265,7 +291,8 @@ class Agent(BaseSessionAgent):
         """
         import time
         from uuid import uuid4
-        from wuwei.planning import PlanExecutor, Planner, TaskList
+        from wuwei.planning import PlanExecutor, Planner, TaskList, Task
+        from wuwei.planning.task import PlanSpec
         from wuwei.graph.state import State
         from wuwei.middleware.base import MiddlewareContext
         from wuwei.runtime.context import current_context
@@ -319,11 +346,14 @@ class Agent(BaseSessionAgent):
                         [m.model_copy(deep=True) for m in current.context.get_messages()[:-1]]
                     )
                     typed, planning_result = await planning_agent.run_structured(
-                        p._build_plan_prompt(goal), TaskList, session=planning_session
+                        p._build_plan_prompt(goal), PlanSpec, session=planning_session
                     )
                     if planning_result.status != "completed":
                         raise ValueError(f"Planning did not complete: {planning_result.status}")
-                    tasks = typed.tasks
+                    tasks = [
+                        Task(id=t.id, description=t.description, next=t.next, status="pending")
+                        for t in typed.tasks
+                    ]
                     p.last_usage = planning_result.usage
                     p.last_llm_calls = planning_result.llm_calls
                     p.last_latency_ms = planning_result.latency_ms
@@ -370,6 +400,132 @@ class Agent(BaseSessionAgent):
                 current.last_latency_ms = metadata["latency_ms"]
                 current_context.reset(token)
 
+    @asynccontextmanager
+    async def _session_scope(self, session):
+        if self._closed:
+            raise RuntimeError("Agent is closed")
+        self._active_runs += 1
+        try:
+            if self.session_store is None:
+                yield session
+                return
+            import asyncio
+
+            lock = self._store_locks.setdefault(session.session_id, asyncio.Lock())
+            async with lock:
+                async with self.session_store.checkout(session):
+                    yield session
+        finally:
+            self._active_runs -= 1
+
+    async def _stream_session(self, user_input, session):
+        terminal = None
+        async with self._session_scope(session):
+            events = self.create_runner(session).stream_events(user_input)
+            try:
+                async for event in events:
+                    if event.type == "run_end":
+                        terminal = event
+                    else:
+                        yield event
+            finally:
+                await events.aclose()
+        if terminal is not None:
+            yield terminal
+
+    async def load_session(self, session_id: str):
+        if session_id in self._sessions:
+            return self._sessions[session_id]
+        if self.session_store is None:
+            raise ValueError("load_session requires session_store")
+        session = await self.session_store.load(session_id)
+        if session is None:
+            return None
+        # An await may race another load; preserve one object/lock per session.
+        return self._sessions.setdefault(session_id, session)
+
+    async def release_session(self, session_id: str, *, delete: bool = False):
+        """Evict an idle cached session; optionally delete its durable history."""
+        session = self._sessions.get(session_id)
+        lock = self._store_locks.get(session_id)
+        if (session and session.lock.locked()) or (lock and lock.locked()):
+            raise RuntimeError("Cannot release an executing session")
+        if session and (
+            session.metadata.get("_blocked_run") or session.metadata.get("_pending_interrupt")
+        ):
+            if delete or self.session_store is None:
+                raise ValueError(
+                    "Reconcile/resume blocked session before evicting its only history"
+                )
+        if delete and self.session_store is not None:
+            await self.session_store.delete(session_id)
+        self._sessions.pop(session_id, None)
+        self._store_locks.pop(session_id, None)
+        if self._default_session is session:
+            self._default_session = None
+
+    async def run_plan(self, goal: str, *, context: str = "", planner=None, session=None):
+        current = session or self._default_session
+        if current is None:
+            current = self.create_session()
+            self._default_session = current
+        async with self._session_scope(current):
+            return await self._run_plan(goal, context=context, planner=planner, session=current)
+
+    async def reconcile(
+        self,
+        checkpoint_id: str,
+        *,
+        tool_call_id: str,
+        outcome,
+        operator: str,
+        evidence: str,
+        session=None,
+    ):
+        if self.checkpointer is None:
+            raise ValueError("reconcile requires checkpointer")
+        if session is None:
+            state = await self.checkpointer.load(checkpoint_id)
+            saved = state.metadata.get("session")
+            if not saved:
+                raise ValueError("Checkpoint has no durable session")
+            session = self._sessions.get(saved["session_id"])
+            if session is None:
+                session = AgentSession.from_dict(saved)
+                self._sessions[session.session_id] = session
+        async with self._session_scope(session):
+            return await self.create_runner(session).reconcile(
+                checkpoint_id,
+                tool_call_id=tool_call_id,
+                outcome=outcome,
+                operator=operator,
+                evidence=evidence,
+            )
+
+    async def aclose(self):
+        if self._closed:
+            return
+        if (
+            self._active_runs
+            or any(s.lock.locked() for s in self._sessions.values())
+            or any(lock.locked() for lock in self._store_locks.values())
+        ):
+            raise RuntimeError("Close active runs before closing Agent")
+        if self.event_bus is not None:
+            await self.event_bus.drain()
+        if self.owns_llm:
+            await self.llm.aclose()
+        self._sessions.clear()
+        self._store_locks.clear()
+        self._default_session = None
+        self._closed = True
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
+
     async def fork(
         self, checkpoint_id: str, *, overrides: dict | None = None, allow_side_effects: bool = False
     ):
@@ -399,6 +555,8 @@ class Agent(BaseSessionAgent):
         load_builtins: bool | str | list[str] = "minimal",
         checkpointer=None,
         event_bus=None,
+        session_store=None,
+        deps=None,
         **llm_kwargs,
     ) -> "Agent":
         llm = LLMGateway.from_env(**llm_kwargs)
@@ -427,4 +585,7 @@ class Agent(BaseSessionAgent):
             load_builtins=load_builtins,
             checkpointer=checkpointer,
             event_bus=event_bus,
+            session_store=session_store,
+            deps=deps,
+            owns_llm=True,
         )

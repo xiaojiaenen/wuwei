@@ -15,6 +15,7 @@ import tempfile
 import time
 
 from wuwei.sandbox.base import BaseSandbox, SandboxResult, run_shell
+from wuwei.sandbox.process import communicate, process_options
 
 
 class LocalSandbox(BaseSandbox):
@@ -126,6 +127,7 @@ class LocalPythonDriver:
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
+                **process_options(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -141,9 +143,7 @@ class LocalPythonDriver:
             )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(stdin_data), timeout=timeout
-            )
+            stdout, stderr = await communicate(process, stdin_data, timeout=timeout)
         except TimeoutError:
             # 超时：杀掉整个进程
             with contextlib.suppress(ProcessLookupError):

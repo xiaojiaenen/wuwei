@@ -172,3 +172,47 @@ __all__ = [
     "make_vfs_plugin",
     "make_vfs_tools",
 ]
+
+from wuwei.artifacts import ArtifactRef, ArtifactStore
+from wuwei.core.message import CitationPart, ContentPart, FilePart, ImagePart, TextPart
+from wuwei.llm import ModelCapabilities, ModelProfile, OutputSpec
+from wuwei.persistence import (
+    DBOSJobBackend,
+    JobBackend,
+    JobRecord,
+    JobService,
+    SessionBusy,
+    SessionStore,
+    SQLiteJobStore,
+    SQLiteSessionStore,
+    build_dbos_workflow,
+)
+from wuwei.runtime import DelegationInput, DelegationOutput, RunContext, RunState
+from wuwei.tools import ToolOutcome
+
+__all__ += [
+    "ArtifactRef",
+    "ArtifactStore",
+    "CitationPart",
+    "ContentPart",
+    "FilePart",
+    "ImagePart",
+    "TextPart",
+    "ModelCapabilities",
+    "ModelProfile",
+    "OutputSpec",
+    "DBOSJobBackend",
+    "JobBackend",
+    "JobRecord",
+    "JobService",
+    "SessionBusy",
+    "SessionStore",
+    "SQLiteJobStore",
+    "SQLiteSessionStore",
+    "build_dbos_workflow",
+    "DelegationInput",
+    "DelegationOutput",
+    "RunContext",
+    "RunState",
+    "ToolOutcome",
+]

@@ -224,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI：python -m wuwei.debug <sqlite_path> [--show <id>]"""
     parser = argparse.ArgumentParser(prog="wuwei.debug", description="Time-Travel 检查点浏览器")
     parser.add_argument("db", help="SQLiteCheckpointer 数据库路径")
+    parser.add_argument("--summary", help="只显示运行状态、用量与工具状态，不显示正文/参数")
     parser.add_argument("--show", help="展示某个检查点的完整消息序列")
     parser.add_argument("--limit", type=int, default=50)
     args = parser.parse_args(argv)
@@ -232,6 +233,31 @@ def main(argv: list[str] | None = None) -> int:
 
     async def _run() -> int:
         cp = SQLiteCheckpointer(args.db)
+        if args.summary:
+            state = await cp.load(args.summary)
+            meta = state.metadata or {}
+            run = meta.get("run_state") or {}
+            safe = {
+                key: run[key]
+                for key in (
+                    "schema_version",
+                    "run_id",
+                    "session_id",
+                    "parent_run_id",
+                    "trace_id",
+                    "status",
+                    "step_index",
+                    "llm_calls",
+                    "latency_ms",
+                    "usage_total",
+                    "usage_available",
+                    "tool_states",
+                )
+                if key in run
+            }
+            safe.update(checkpoint_id=args.summary, kind=meta.get("kind"))
+            print(json.dumps(safe, ensure_ascii=False, indent=2))
+            return 0
         if args.show:
             state = await cp.load(args.show)
             if state is None:

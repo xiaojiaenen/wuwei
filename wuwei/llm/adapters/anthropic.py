@@ -8,6 +8,7 @@
 现在 tool 参数增量走 tool_calls_delta 通道，由网关按 index 聚合。
 """
 
+import inspect
 import json
 from typing import Any
 
@@ -20,7 +21,7 @@ from ..types import (
     ToolCall,
     normalize_finish_reason,
 )
-from .base import BaseAdapter, make_client
+from .base import BaseAdapter, make_client, output_parts, provider_dump
 
 
 class AnthropicAdapter(BaseAdapter):
@@ -33,7 +34,7 @@ class AnthropicAdapter(BaseAdapter):
         api_key: str,
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 4096,
-        temperature: float = 0.2,
+        temperature: float | None = None,
         enable_prompt_caching: bool = True,
         base_url: str | None = None,
         client=None,
@@ -77,7 +78,7 @@ class AnthropicAdapter(BaseAdapter):
                 block = {
                     "type": "tool_result",
                     "tool_use_id": msg.tool_call_id,
-                    "content": msg.content or "",
+                    "content": msg.provider_content("anthropic"),
                     "is_error": getattr(msg, "status", "success") == "error",
                 }
                 if (
@@ -91,7 +92,9 @@ class AnthropicAdapter(BaseAdapter):
                 continue
 
             content: Any = list(msg.metadata.get("anthropic_reasoning", []))
-            if msg.content:
+            if msg.content_parts:
+                content.extend(msg.provider_content("anthropic"))
+            elif msg.content:
                 content.append({"type": "text", "text": msg.content})
             if msg.tool_calls:
                 for tc in msg.tool_calls:
@@ -136,7 +139,7 @@ class AnthropicAdapter(BaseAdapter):
         if tools:
             request["tools"] = self._convert_tools(tools)
 
-        return request
+        return {k: v for k, v in request.items() if v is not None}
 
     def _convert_tools(self, tools: list) -> list[dict]:
         """转换工具格式为 Anthropic 格式（支持 Tool 对象与 dict schema）"""
@@ -158,6 +161,11 @@ class AnthropicAdapter(BaseAdapter):
                 converted.append(
                     {
                         "name": tool["function"]["name"],
+                        **(
+                            {"strict": tool["function"]["strict"]}
+                            if "strict" in tool["function"]
+                            else {}
+                        ),
                         "description": tool["function"].get("description", ""),
                         "input_schema": tool["function"].get(
                             "parameters", {"type": "object", "properties": {}, "required": []}
@@ -170,6 +178,14 @@ class AnthropicAdapter(BaseAdapter):
 
     async def call(self, request: dict) -> Any:
         """调用 Anthropic API（stream=True 时返回 AsyncStream）"""
+        # SDK versions differ: newer Messages APIs removed sampling controls.
+        parameters = inspect.signature(self.client.messages.create).parameters
+        if "temperature" not in parameters and not any(
+            p.kind == p.VAR_KEYWORD for p in parameters.values()
+        ):
+            if request.get("temperature") is not None:
+                raise ValueError("Installed Anthropic SDK does not support temperature")
+            request = {k: v for k, v in request.items() if k != "temperature"}
         return await self.client.messages.create(**request)
 
     def parse_response(self, raw_response: Any) -> LLMResponse:
@@ -203,14 +219,19 @@ class AnthropicAdapter(BaseAdapter):
         internal_msg = Message(
             role="assistant",
             content="".join(content_parts),
+            content_parts=output_parts(raw_response.content),
             tool_calls=tool_calls,
             reasoning_content="".join(reasoning_parts) or None,
             metadata={
+                "refusal": "provider_refusal"
+                if getattr(raw_response, "stop_reason", None) == "refusal"
+                else None,
+                "provider_output": [provider_dump(b) for b in raw_response.content],
                 "anthropic_reasoning": [
                     b.model_dump() if hasattr(b, "model_dump") else vars(b)
                     for b in raw_response.content
                     if b.type in ("thinking", "redacted_thinking")
-                ]
+                ],
             },
         )
 
@@ -261,7 +282,7 @@ class AnthropicAdapter(BaseAdapter):
                         }
                     }
                 }
-            return None
+            return {"provider_metadata": {"provider_event": provider_dump(chunk)}}
 
         if ctype == "content_block_delta":
             delta = chunk.delta
@@ -292,7 +313,7 @@ class AnthropicAdapter(BaseAdapter):
                 }
             if hasattr(delta, "thinking"):
                 return {"reasoning_content": delta.thinking or "", "content": ""}
-            return None
+            return {"provider_metadata": {"provider_event": provider_dump(chunk)}}
 
         if ctype == "message_start":
             usage = self._parse_usage(getattr(chunk, "message", chunk))
@@ -303,6 +324,8 @@ class AnthropicAdapter(BaseAdapter):
             stop_reason = getattr(getattr(chunk, "delta", None), "stop_reason", None)
             if stop_reason is not None:
                 result["finish_reason"] = stop_reason
+                if stop_reason == "refusal":
+                    result["provider_metadata"] = {"refusal": "provider_refusal"}
             if hasattr(chunk, "usage") and chunk.usage is not None:
                 result["usage"] = self._parse_usage(chunk)
             return result if (result.get("finish_reason") or result.get("usage")) else None

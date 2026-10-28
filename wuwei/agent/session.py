@@ -55,6 +55,7 @@ class AgentSession:
                 "value": metadata[ACTION_LOG_KEY].to_dict(),
             }
         return {
+            "schema_version": 1,
             "session_id": self.session_id,
             "system_prompt": self.system_prompt,
             "max_steps": self.max_steps,
@@ -69,6 +70,8 @@ class AgentSession:
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentSession":
+        if data.get("schema_version", 1) != 1:
+            raise ValueError("Unsupported session snapshot version")
         session = cls(
             session_id=data["session_id"],
             system_prompt=data.get("system_prompt", "你是一个有用的助手"),

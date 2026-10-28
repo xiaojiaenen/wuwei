@@ -13,12 +13,16 @@ docker CLI 缺失或守护进程不可达时抛出
 
 import asyncio
 import base64
-import contextlib
 import json
+import logging
+import re
 import shutil
+import tempfile
 import time
+from pathlib import Path
 
 from wuwei.sandbox.base import SandboxResult, SandboxUnavailable
+from wuwei.sandbox.process import communicate, process_options
 
 # 经 -c 传入容器内 python 的 bootstrap：从 stdin 读取 JSON 载荷
 # （{"code": b64, "files": {path: b64}}），写入文件后执行用户代码。
@@ -80,11 +84,13 @@ class DockerDriver:
             )
         try:
             proc = await asyncio.create_subprocess_exec(
-                self.docker_bin, "info",
+                self.docker_bin,
+                "info",
+                **process_options(),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            _, stderr = await communicate(proc, timeout=15)
         except (TimeoutError, OSError) as e:
             self._docker_available = False
             raise SandboxUnavailable(f"docker 守护进程不可用: {e}") from e
@@ -152,38 +158,75 @@ class DockerDriver:
         timeout: float,
     ) -> SandboxResult:
         start = time.monotonic()
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as e:
-            self._docker_available = False
-            raise SandboxUnavailable(f"无法启动 docker 进程: {e}") from e
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(stdin_data), timeout=timeout
-            )
-        except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            with contextlib.suppress(Exception):  # pragma: no cover
-                await process.wait()
+        # A private directory prevents collisions across concurrent runs. Docker creates
+        # the file only after it has obtained the daemon's container identity.
+        with tempfile.TemporaryDirectory(prefix="wuwei-docker-") as directory:
+            cidfile = Path(directory) / "container.cid"
+            owned_run = len(argv) > 1 and argv[1] == "run"
+            if owned_run:
+                argv = [*argv[:2], "--cidfile", str(cidfile), *argv[2:]]
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    **process_options(),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError as error:
+                self._docker_available = False
+                raise SandboxUnavailable(f"无法启动 docker 进程: {error}") from error
+            try:
+                stdout, stderr = await communicate(process, stdin_data, timeout=timeout)
+            except (TimeoutError, asyncio.CancelledError) as error:
+                cleanup = (
+                    await asyncio.shield(self._remove_owned_container(cidfile))
+                    if owned_run
+                    else "unconfirmed: no owned container identity"
+                )
+                if isinstance(error, asyncio.CancelledError):
+                    logging.getLogger(__name__).info("Docker cancellation cleanup %s", cleanup)
+                    error.add_note(f"Docker container cleanup {cleanup}")
+                    raise
+                return SandboxResult(
+                    success=False,
+                    error=(
+                        f"沙箱执行超时 ({timeout}s); local CLI terminated; "
+                        f"container cleanup {cleanup}"
+                    ),
+                    exit_code=-1,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
+            exit_code = process.returncode if process.returncode is not None else -1
             return SandboxResult(
-                success=False,
-                error=f"沙箱执行超时 ({timeout}s)，容器已被终止",
-                exit_code=-1,
+                success=exit_code == 0,
+                output=stdout.decode(errors="replace"),
+                error=stderr.decode(errors="replace"),
+                exit_code=exit_code,
                 duration_ms=(time.monotonic() - start) * 1000,
             )
 
-        exit_code = process.returncode if process.returncode is not None else -1
-        return SandboxResult(
-            success=exit_code == 0,
-            output=stdout.decode(errors="replace"),
-            error=stderr.decode(errors="replace"),
-            exit_code=exit_code,
-            duration_ms=(time.monotonic() - start) * 1000,
-        )
+    async def _remove_owned_container(self, cidfile: Path) -> str:
+        try:
+            container_id = cidfile.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            return "unconfirmed: container identity unavailable"
+        # Never accept names, prefixes, paths or command flags as authoritative IDs.
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            return "unconfirmed: invalid container identity"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.docker_bin,
+                "rm",
+                "-f",
+                container_id,
+                **process_options(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await communicate(process, timeout=10)
+            if process.returncode == 0:
+                return "confirmed"
+            return f"unconfirmed: daemon rejected removal; container_id={container_id}"
+        except (OSError, TimeoutError):
+            return f"unconfirmed: daemon unavailable; container_id={container_id}"

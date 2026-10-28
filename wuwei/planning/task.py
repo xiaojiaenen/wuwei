@@ -29,6 +29,21 @@ class Task(BaseModel):
     llm_calls: int = 0
 
 
+class PlannedTask(BaseModel):
+    """Model-facing plan proposal; execution state is owned by the executor."""
+
+    id: int
+    description: str
+    next: list[int]
+    status: Literal["pending", "in_progress"] = "pending"
+    result: None = None
+    error: None = None
+
+
+class PlanSpec(BaseModel):
+    tasks: list[PlannedTask] = Field(default_factory=list)
+
+
 class TaskList(BaseModel):
     """任务列表包装对象。"""
 

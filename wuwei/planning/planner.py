@@ -1,5 +1,5 @@
 from wuwei.llm import LLMGateway, LLMResponse, Message
-from wuwei.planning.task import Task, TaskList
+from wuwei.planning.task import Task, PlanSpec
 
 
 class Planner:
@@ -62,10 +62,15 @@ class Planner:
         self.last_latency_ms = 0
         self.last_llm_calls = 0
 
+        kwargs = {}
+        if isinstance(self.llm, LLMGateway):
+            from wuwei.llm.output import OutputSpec
+
+            kwargs["output_spec"] = OutputSpec(schema=PlanSpec.model_json_schema())
         response: LLMResponse = await self.llm.generate(
             messages=[Message(role="user", content=self._build_plan_prompt(goal))],
             stream=False,
-            response_format={"type": "json_object"},
+            **kwargs,
         )
         self.last_usage = dict(response.usage) if response.usage else {}
         self.last_latency_ms = response.latency_ms
@@ -74,15 +79,19 @@ class Planner:
         if not content:
             raise ValueError("Planner 未返回任何内容")
 
-        wrapper = TaskList.model_validate_json(content)
+        wrapper = PlanSpec.model_validate_json(content)
         # These are newly proposed tasks, not persisted execution snapshots. Older
         # planner prompts used in_progress for the root; never treat that as live work.
-        for task in wrapper.tasks:
+        tasks = [
+            Task(id=t.id, description=t.description, next=t.next, status="pending")
+            for t in wrapper.tasks
+        ]
+        for task in tasks:
             task.status = "pending"
             task.result = task.error = task.interrupt = task.session_id = None
             task.usage = {}
             task.llm_calls = 0
-        return wrapper.tasks
+        return tasks
 
     @classmethod
     def create_planner(cls, llm: LLMGateway) -> "Planner":

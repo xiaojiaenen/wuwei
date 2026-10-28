@@ -25,7 +25,7 @@ import os
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger("wuwei.config")
 
@@ -39,7 +39,12 @@ class LLMConfig(BaseModel):
     api_key: str | None = None
     api_key_env: str | None = None  # 从环境变量读取 api key
     base_url: str | None = None
-    temperature: float = 0.2
+    temperature: float | None = None
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    prompt_cache_options: dict[str, Any] | None = None
+    prompt_cache_key: str | None = None
+    reasoning: dict[str, Any] | None = None
+    model_profile: dict[str, Any] | None = None
     max_tokens: int | None = None
     max_output_tokens: int | None = None
     max_completion_tokens: int | None = None
@@ -174,6 +179,33 @@ def _build_middleware(spec: dict):
     )
 
 
+def effective_llm_config(config: LLMConfig) -> dict[str, Any]:
+    """Only explicitly supplied model settings override gateway defaults (including null)."""
+    values = config.model_dump(exclude={"api_key_env", "provider_options"}, exclude_unset=True)
+    options = dict(config.provider_options)
+    reserved = {
+        "provider",
+        "model",
+        "api_key",
+        "api_key_env",
+        "base_url",
+        "retry",
+        "timeout",
+        "fallback",
+        "adapter",
+        "adapter_factory",
+        "model_profile",
+        "artifact_store",
+        "artifact_owner",
+    }
+    if options.keys() & reserved:
+        raise ValueError(f"Reserved provider options: {sorted(options.keys() & reserved)}")
+    overlap = values.keys() & options.keys()
+    if overlap:
+        raise ValueError(f"Duplicate provider options: {sorted(overlap)}")
+    return {**values, "provider_options": options}
+
+
 def create_agent_from_config(config: AgentConfig, **extra):
     """从配置创建 Agent。
 
@@ -185,7 +217,7 @@ def create_agent_from_config(config: AgentConfig, **extra):
     from wuwei.middleware.stack import MiddlewareStack
 
     # 创建 LLM
-    llm_config: dict[str, Any] = config.llm.model_dump(exclude={"api_key_env"}, exclude_none=True)
+    llm_config: dict[str, Any] = effective_llm_config(config.llm)
     if config.llm.api_key:
         llm_config["api_key"] = config.llm.api_key
     elif config.llm.api_key_env:

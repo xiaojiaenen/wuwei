@@ -22,8 +22,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
-        help="agent 工厂，格式 module:func（调用 func() 返回 Agent），默认 wuwei.agent:Agent.from_env",
+        help="agent 工厂 module:func，默认 wuwei.agent:Agent.from_env",
     )
+    run.add_argument("--baseline", help="Previous JSON report; any case regression fails")
     run.add_argument("--judge", default=None, help="LLM-as-judge，格式 module:async_func")
     run.add_argument(
         "--fail-under",
@@ -32,7 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="通过率及格线，低于该值退出码为 1（默认 1.0）",
     )
     run.add_argument("--json", dest="json_out", default=None, help="将 json 报告写入该路径")
-    run.add_argument("--junit", dest="junit_out", default=None, help="将 junit xml 写入该路径（CI 用）")
+    run.add_argument(
+        "--junit", dest="junit_out", default=None, help="将 junit xml 写入该路径（CI 用）"
+    )
     return parser
 
 
@@ -68,7 +71,24 @@ def main(argv: list[str] | None = None) -> int:
     runner = EvalRunner(agent_factory=agent_factory, judge=judge)
     report = asyncio.run(runner.run(dataset))
 
+    comparison = None
+    if args.baseline:
+        import json
+        from pathlib import Path
+
+        from wuwei.evals.report import EvalReport
+
+        try:
+            data = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+            comparison = report.compare(
+                EvalReport(dataset_name=data["dataset_name"], results=data["results"])
+            )
+        except (OSError, ValueError, KeyError) as error:
+            print(f"Invalid baseline: {error}", file=sys.stderr)
+            return 2
     print(report.summary())
+    if comparison:
+        print(f"Baseline comparison: {comparison}")
 
     if args.json_out:
         from pathlib import Path
@@ -82,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         p = report.write_junit(args.junit_out)
         print(f"junit xml 已写入: {p}")
 
+    if comparison and comparison["regressions"]:
+        return 1
     if report.pass_rate < args.fail_under:
         print(
             f"通过率 {report.pass_rate:.1%} 低于及格线 {args.fail_under:.0%}，评估失败",

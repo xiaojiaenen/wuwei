@@ -82,6 +82,7 @@ asyncio.run(main())
 - [在线文档入口](docs/index.md)及[可执行离线示例](docs/examples/offline.md)。
 - [更新日志](CHANGELOG.md)。
 - [发布指南](docs/RELEASING.md)：GitHub Actions + PyPI Trusted Publishing。
+- [生产运行契约](docs/guides/durable-execution.md)：持久会话、后台任务、DBOS、审批与诊断。
 
 ```bash
 pytest                 # 默认离线测试

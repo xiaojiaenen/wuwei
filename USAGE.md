@@ -111,7 +111,7 @@ class Summary(BaseModel):
 #     assert output is None
 ```
 
-返回 `(Summary | None, AgentRunResult)`；校验纠正调用计入同一 run 预算。JSON 提示与验证不等于每个 provider 都支持原生严格 schema。
+返回 `(Summary | None, AgentRunResult)`；校验纠正调用计入同一 run 预算。真实 LLMGateway 默认按能力档案选择原生 schema 或提示后备，可显式传 `output_mode="native"/"tool"/"prompted"`。严格原生模式要求对象 schema；开放字典等不兼容结构应显式选 prompted，不会静默丢字段。自定义 LLM 保留原提示后校验入口。
 
 ## 审批、权限和恢复
 
@@ -177,3 +177,12 @@ interrupted 映射 input-required，恢复数据在任务 metadata.interrupt 中
 ## 事件、评估与集成
 
 EventBus 订阅运行事件，ActionLog 记录动作；OpenTelemetry 需 observability extra。`wuwei-evals` 运行数据集与轨迹/输出/rubric 断言；LLM judge 需要模型调用预算。`wuwei-debug` 浏览检查点。多平台 gateway 包含飞书、钉钉、Telegram、微信与 Webhook 适配器；DecisionClient 提供决策服务入口。每种远程服务都应做部署环境独立验收。
+
+## 新的生产契约
+
+- [模型能力、原生结构化输出与类型化内容](docs/model-contracts.md)：Python/YAML配置一致；图片、文件与引用使用content_parts，旧字符串入口保留。
+- [可信工具结果、业务依赖与类型化委派](docs/runtime-contracts.md)：ToolOutcome控制执行状态，普通业务JSON不再影响运行治理。
+- [持久会话、任务与DBOS](docs/guides/durable-execution.md)：重启恢复、租约隔离、审批信号、对账和生命周期。
+- [评估门禁、追踪与子进程清理](docs/guides/quality-and-lifecycle.md)：终止状态、实际工具轨迹、多轮用例、baseline与脱敏追踪。
+
+`Agent.run` / `run_structured` / `stream_events`也接受带content_parts的HumanMessage。模型返回的类型化正文与引用保留在result.content_parts和metadata中；协议出口使用统一的类型化JSON编码，未知Python对象不会被静默str()。

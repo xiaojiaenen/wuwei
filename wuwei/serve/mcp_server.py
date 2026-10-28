@@ -46,11 +46,20 @@ def _result_to_payload(result: Any) -> dict[str, Any]:
     latency_ms = _result_field(result, "latency_ms")
     if latency_ms is not None:
         payload["latency_ms"] = latency_ms
-    for key in ("interrupt", "termination_reason", "usage_available", "output"):
+    for key in (
+        "interrupt",
+        "termination_reason",
+        "usage_available",
+        "output",
+        "content_parts",
+        "metadata",
+    ):
         value = _result_field(result, key)
         if value is not None:
             payload[key] = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
-    return payload
+    from pydantic_core import to_jsonable_python
+
+    return to_jsonable_python(payload)
 
 
 def build_mcp_server(
@@ -87,7 +96,16 @@ def build_mcp_server(
                 if session_id is not None
                 else agent.create_session()
             )
-            result = await agent.run(task, session=session)
+            try:
+                result = await agent.run(task, session=session)
+            finally:
+                release = getattr(agent, "release_session", None)
+                unresolved = getattr(session, "metadata", {}) or {}
+                can_evict = getattr(agent, "session_store", None) is not None or not (
+                    unresolved.get("_blocked_run") or unresolved.get("_pending_interrupt")
+                )
+                if session_id is None and callable(release) and can_evict:
+                    await release(session.session_id)
         else:
             result = await agent.run(task)
         return _result_to_payload(result)

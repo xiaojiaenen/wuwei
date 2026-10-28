@@ -17,7 +17,7 @@ from ..types import (
     Message,
     ToolCall,
 )
-from .base import BaseAdapter, make_client
+from .base import BaseAdapter, make_client, output_parts, provider_dump
 from .usage import parse_openai_usage
 
 
@@ -71,7 +71,7 @@ class ResponsesAdapter(BaseAdapter):
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": msg.content or "",
+                        "output": msg.provider_content("responses"),
                     }
                 )
             elif msg.role == "assistant" and msg.tool_calls:
@@ -86,8 +86,8 @@ class ResponsesAdapter(BaseAdapter):
                             "arguments": json.dumps(tc.function.arguments, ensure_ascii=False),
                         }
                     )
-            elif msg.content:
-                items.append({"role": msg.role, "content": msg.content})
+            elif msg.content or msg.content_parts:
+                items.append({"role": msg.role, "content": msg.provider_content("responses")})
 
         return "\n\n".join(instructions_parts), items
 
@@ -103,6 +103,7 @@ class ResponsesAdapter(BaseAdapter):
                         "name": func["name"],
                         "description": func.get("description", ""),
                         "parameters": func.get("parameters", {"type": "object", "properties": {}}),
+                        **({"strict": func["strict"]} if "strict" in func else {}),
                     }
                 )
         return converted
@@ -172,13 +173,31 @@ class ResponsesAdapter(BaseAdapter):
             message=Message(
                 role="assistant",
                 content="".join(content_parts),
+                content_parts=output_parts(
+                    [
+                        block
+                        for item in getattr(raw_response, "output", [])
+                        if getattr(item, "type", None) == "message"
+                        for block in getattr(item, "content", [])
+                    ]
+                ),
                 tool_calls=tool_calls,
                 metadata={
+                    "refusal": "".join(
+                        getattr(block, "refusal", "")
+                        for item in getattr(raw_response, "output", [])
+                        for block in getattr(item, "content", [])
+                        if getattr(block, "type", None) == "refusal"
+                    )
+                    or None,
+                    "provider_output": [
+                        provider_dump(item) for item in getattr(raw_response, "output", [])
+                    ],
                     "responses_reasoning": [
                         item.model_dump() if hasattr(item, "model_dump") else vars(item)
                         for item in getattr(raw_response, "output", [])
                         if getattr(item, "type", None) == "reasoning"
-                    ]
+                    ],
                 },
             ),
             finish_reason=("tool_calls" if tool_calls else "stop")
@@ -201,6 +220,20 @@ class ResponsesAdapter(BaseAdapter):
 
     def parse_stream_chunk(self, chunk: Any) -> AdapterEvent | None:
         event_type = getattr(chunk, "type", None)
+
+        if event_type == "response.refusal.delta":
+            return {
+                "provider_metadata": {
+                    "refusal_delta": getattr(chunk, "delta", ""),
+                    "provider_event": provider_dump(chunk),
+                }
+            }
+
+        if event_type in (
+            "response.output_text.annotation.added",
+            "response.output_item.done",
+        ):
+            return {"provider_metadata": {"provider_event": provider_dump(chunk)}}
 
         if event_type == "response.reasoning_summary_text.delta":
             return {"reasoning_content": getattr(chunk, "delta", "") or ""}
@@ -233,19 +266,29 @@ class ResponsesAdapter(BaseAdapter):
             }
 
         if event_type in ("response.completed", "response.incomplete", "response.failed"):
-            if event_type != "response.completed":
-                return {"finish_reason": event_type.split(".")[1]}
             response = getattr(chunk, "response", None)
             result: dict[str, Any] = {}
             output = getattr(response, "output", None) or []
             has_tool_calls = any(getattr(item, "type", None) == "function_call" for item in output)
-            result["finish_reason"] = "tool_calls" if has_tool_calls else "stop"
+            result["finish_reason"] = (
+                ("tool_calls" if has_tool_calls else "stop")
+                if event_type == "response.completed"
+                else event_type.split(".")[1]
+            )
             result["provider_metadata"] = {
+                "refusal": "".join(
+                    getattr(block, "refusal", "")
+                    for item in output
+                    for block in getattr(item, "content", [])
+                    if getattr(block, "type", None) == "refusal"
+                )
+                or None,
+                "provider_output": [provider_dump(item) for item in output],
                 "responses_reasoning": [
                     item.model_dump() if hasattr(item, "model_dump") else vars(item)
                     for item in output
                     if getattr(item, "type", None) == "reasoning"
-                ]
+                ],
             }
             usage = self._parse_usage(getattr(response, "usage", None))
             if getattr(response, "usage", None) is not None:

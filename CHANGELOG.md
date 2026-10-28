@@ -1,5 +1,15 @@
 # 更新日志
 
+## 未发布 — 框架契约与持久执行
+
+- 修复工具业务JSON误触发unknown、评估非完成结果假绿、YAML与Python模型参数不一致。
+- 新增ModelProfile/OutputSpec：原生、工具及提示式结构化输出；严格schema转换、拒答语义与恢复保留。
+- 新增类型化图片/文件/引用、owner隔离ArtifactStore及过期维护，贯通Agent、协议与持久会话。
+- 新增可信ToolOutcome、瞬态RunContext依赖、类型化子代理输入/输出、上下文及产物选择。
+- 新增版本化RunState、原子对账、SQLiteSessionStore、JobService与可选DBOS持久队列适配。
+- 评估支持实际工具轨迹、多轮、限制、必需judge、baseline比较及资源关闭；完善运行追踪和安全诊断。
+- 修复子进程取消清理，Docker按owned cidfile尝试清理；统一协议JSON类型化序列化。
+
 ## 3.2.2 — 2026-10-28
 
 - OpenAI SDK 最低版本更新至 3.40.0，Responses 支持显式配置 prompt_cache_options / prompt_cache_key。

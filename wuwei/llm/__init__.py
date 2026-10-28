@@ -22,3 +22,8 @@ __all__ = [
     "LLMResponse",
     "LLMResponseChunk",
 ]
+
+from .profile import ModelCapabilities, ModelProfile
+from .output import OutputSpec
+
+__all__ += ["ModelCapabilities", "ModelProfile", "OutputSpec"]

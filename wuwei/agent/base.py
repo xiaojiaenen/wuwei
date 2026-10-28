@@ -57,6 +57,8 @@ class BaseSessionAgent(BaseAgent):
         parallel_tool_calls: bool | None = None,
     ) -> AgentSession:
         """创建一个新会话，并写入默认 system prompt。"""
+        if session_id is not None and session_id in self._sessions:
+            return self._sessions[session_id]
         session = AgentSession(
             session_id=session_id or uuid4().hex,
             system_prompt=system_prompt or self.default_system_prompt,

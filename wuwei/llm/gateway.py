@@ -25,6 +25,8 @@ from typing import Any
 from ..tools import Tool
 from .adapters import AnthropicAdapter, OpenAIAdapter, ResponsesAdapter
 from .adapters.base import BaseAdapter
+from .output import STRUCTURED_TOOL_NAME, OutputSpec, apply_output
+from .profile import ModelProfile, default_profile
 from .types import (
     FunctionCall,
     LLMResponse,
@@ -87,6 +89,11 @@ class LLMGateway:
         - fallback: {"provider": ..., "api_key": ..., ...}（可选）
         """
         config = dict(config)
+        options = dict(config.pop("provider_options", {}) or {})
+        overlap = options.keys() & config.keys()
+        if overlap:
+            raise ValueError(f"Duplicate provider options: {sorted(overlap)}")
+        config.update(options)
         provider = config.get("provider", "openai")
         if provider in {"zhipu", "dashscope", "ollama"}:
             warnings.warn(
@@ -107,10 +114,19 @@ class LLMGateway:
         if spec is None:
             raise ValueError(f"不支持的 provider: {provider}（可选: {', '.join(_PROVIDER_SPECS)}）")
 
+        self.model_profile = (
+            ModelProfile.model_validate(config["model_profile"])
+            if config.get("model_profile")
+            else (
+                spec.get("model_profile") or default_profile(provider, bool(config.get("base_url")))
+            )
+        )
         adapter_kwargs: dict[str, Any] = {
             "api_key": config.get("api_key") or "missing",
             "model": config.get("model", spec["default_model"]),
-            "temperature": config.get("temperature", None if provider == "responses" else 0.2),
+            "temperature": config.get(
+                "temperature", None if provider in {"responses", "anthropic"} else 0.2
+            ),
         }
         if provider == "responses":
             adapter_kwargs["max_output_tokens"] = config.get(
@@ -134,6 +150,9 @@ class LLMGateway:
             "fallback",
             "adapter",
             "adapter_factory",
+            "model_profile",
+            "artifact_store",
+            "artifact_owner",
         }
         adapter_kwargs.update({k: v for k, v in config.items() if k not in known})
 
@@ -141,6 +160,8 @@ class LLMGateway:
             config.get("adapter_factory") or spec["adapter"]
         )(**adapter_kwargs)
         self.provider = provider
+        self.artifact_store = config.get("artifact_store")
+        self.artifact_owner = config.get("artifact_owner")
         self.retry_policy = config.get("retry") or {"max_attempts": 3}
         if not isinstance(self.retry_policy, dict):
             raise ValueError("retry must be a configuration mapping")
@@ -270,6 +291,85 @@ class LLMGateway:
             return self._generate_stream(messages=messages, tools=tools, **kwargs)
         return await self._generate_single(messages=messages, tools=tools, **kwargs)
 
+    def build_request(self, messages, tools=None, stream=False, output_spec=None, **kwargs):
+        if tools and not self.model_profile.capabilities.tool_calling:
+            raise ValueError("Profile does not support tool calling")
+        if stream and not self.model_profile.capabilities.streaming:
+            raise ValueError("Profile does not support streaming")
+        import base64
+
+        from ..core.message import FilePart, ImagePart
+
+        resolved_messages = []
+        for message in messages:
+            parts = []
+            for part in message.content_parts:
+                if isinstance(part, ImagePart) and not self.model_profile.capabilities.image_input:
+                    raise ValueError("Profile does not support image input")
+                if isinstance(part, FilePart) and not self.model_profile.capabilities.file_input:
+                    raise ValueError("Profile does not support file input")
+                if isinstance(part, (ImagePart, FilePart)) and part.artifact:
+                    if not self.artifact_store or not self.artifact_owner:
+                        raise ValueError(
+                            "Artifact input requires artifact_store and artifact_owner"
+                        )
+                    data = self.artifact_store.read(part.artifact, owner=self.artifact_owner)
+                    url = (
+                        "data:"
+                        + part.artifact.media_type
+                        + ";base64,"
+                        + base64.b64encode(data).decode("ascii")
+                    )
+                    part = part.model_copy(update={"artifact": None, "url": url})
+                parts.append(part)
+            resolved_messages.append(message.model_copy(update={"content_parts": parts}))
+        messages = resolved_messages
+        spec = (
+            OutputSpec.model_validate(output_spec) if isinstance(output_spec, dict) else output_spec
+        )
+        mode = spec.resolve(self.model_profile) if spec else None
+        protocol = getattr(self.adapter, "provider_name", self.provider)
+        if mode == "prompted":
+            from ..core.message import SystemMessage
+
+            messages = [
+                *messages,
+                SystemMessage("Return JSON matching this schema: " + json.dumps(spec.schema_)),
+            ]
+        if mode == "tool":
+            from .output import strict_json_schema
+
+            if tools:
+                raise ValueError("Tool output cannot be combined with executable tools")
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": STRUCTURED_TOOL_NAME,
+                        "description": "Return structured output",
+                        "parameters": (
+                            strict_json_schema(spec.schema_)
+                            if protocol in {"openai", "responses"}
+                            else spec.schema_
+                        ),
+                        "strict": True,
+                    },
+                }
+            ]
+            kwargs["tool_choice"] = (
+                {"type": "tool", "name": STRUCTURED_TOOL_NAME}
+                if protocol == "anthropic"
+                else (
+                    {"type": "function", "name": STRUCTURED_TOOL_NAME}
+                    if protocol == "responses"
+                    else {"type": "function", "function": {"name": STRUCTURED_TOOL_NAME}}
+                )
+            )
+        request = self.adapter.build_request(messages, tools, stream=stream, **kwargs)
+        if mode == "native":
+            apply_output(request, spec, protocol)
+        return request
+
     # ── 错误分类 ─────────────────────────────────────────────────────
 
     @staticmethod
@@ -345,10 +445,20 @@ class LLMGateway:
 
     @classmethod
     def register_provider(
-        cls, name, adapter_factory, *, default_model="", env_prefix="OPENAI", requires_api_key=True
+        cls,
+        name,
+        adapter_factory,
+        *,
+        default_model="",
+        env_prefix="OPENAI",
+        requires_api_key=True,
+        model_profile=None,
     ):
         _PROVIDER_SPECS[name] = {
             "adapter": adapter_factory,
+            "model_profile": ModelProfile.model_validate(model_profile)
+            if model_profile
+            else default_profile(name, True),
             "default_model": default_model,
             "env_prefix": env_prefix,
             "requires_api_key": requires_api_key,
@@ -384,11 +494,15 @@ class LLMGateway:
         await asyncio.sleep(min(delay, float(self.retry_policy.get("max_delay", 60))))
 
     async def _single_attempts(self, messages, tools, **kwargs):
-        request = self.adapter.build_request(messages=messages, tools=tools, stream=False, **kwargs)
+        request = self.build_request(messages=messages, tools=tools, stream=False, **kwargs)
         for attempt in range(int(self.retry_policy.get("max_attempts", 3))):
             try:
                 raw = await self.adapter.call(request)
-                return self.adapter.parse_response(raw)
+                response = self.adapter.parse_response(raw)
+                response.metadata.update(
+                    provider=self.provider, model=response.model, retry_count=attempt
+                )
+                return response
             except Exception as exc:
                 if not self._retryable(exc) or attempt + 1 >= int(
                     self.retry_policy.get("max_attempts", 3)
@@ -427,6 +541,11 @@ class LLMGateway:
                     try:
                         async for chunk in self._stream_once(messages, tools, **kwargs):
                             # Publishing even usage/tool metadata commits this request.
+                            chunk.metadata.update(
+                                provider=self.provider,
+                                model=getattr(self.adapter, "model", ""),
+                                retry_count=attempt,
+                            )
                             observed = True
                             yield chunk
                         return
@@ -452,7 +571,7 @@ class LLMGateway:
                 raise
 
     async def _stream_once(self, messages, tools, **kwargs):
-        request = self.adapter.build_request(messages, tools, stream=True, **kwargs)
+        request = self.build_request(messages, tools, stream=True, **kwargs)
         stream = await self.adapter.call(request)
         pending = {}
         usage = {}
@@ -488,6 +607,21 @@ class LLMGateway:
                                 item[key] = delta[key]
                         item["arguments"] += delta.get("arguments", "")
                 event_metadata = data.get("provider_metadata", {})
+                refusal_delta = event_metadata.get("refusal_delta")
+                if refusal_delta:
+                    provider_metadata["refusal"] = (
+                        provider_metadata.get("refusal", "") + refusal_delta
+                    )
+                event = event_metadata.get("provider_event")
+                if event:
+                    provider_metadata.setdefault("provider_events", []).append(event)
+                provider_metadata.update(
+                    {
+                        k: v
+                        for k, v in event_metadata.items()
+                        if k not in {"refusal_delta", "provider_event"} and v is not None
+                    }
+                )
                 start_block = event_metadata.get("anthropic_reasoning_start")
                 if start_block:
                     active_reasoning_index = start_block["index"]

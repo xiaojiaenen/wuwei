@@ -55,3 +55,36 @@ class BaseAdapter(ABC):
     @abstractmethod
     def parse_stream_chunk(self, chunk: Any) -> AdapterEvent | None:
         pass
+
+
+def provider_dump(obj):
+    """Lossless JSON-safe SDK output for forward-compatible consumers."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, dict):
+        return obj
+    return vars(obj)
+
+
+def output_parts(blocks):
+    """Project known display fields while keeping the entire provider payload separately."""
+    from ...core.message import CitationPart, TextPart
+
+    parts = []
+    for block in blocks:
+        data = provider_dump(block)
+        if data.get("type") in {"text", "output_text"}:
+            parts.append(TextPart(text=data.get("text", "")))
+        annotations = data.get("annotations", data.get("citations", [])) or []
+        for annotation in annotations:
+            a = provider_dump(annotation) if not isinstance(annotation, dict) else annotation
+            value = a.get("url_citation", a)
+            parts.append(
+                CitationPart(
+                    url=value.get("url"),
+                    title=value.get("title"),
+                    text=value.get("cited_text"),
+                    provider_data=a,
+                )
+            )
+    return parts

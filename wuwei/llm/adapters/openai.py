@@ -18,7 +18,7 @@ from ..types import (
     ToolCall,
     normalize_finish_reason,
 )
-from .base import BaseAdapter, make_client
+from .base import BaseAdapter, make_client, output_parts, provider_dump
 from .usage import parse_openai_usage
 
 
@@ -120,6 +120,19 @@ class OpenAIAdapter(BaseAdapter):
             content=message.content or "",
             reasoning_content=self._get_extra_field(message, "reasoning_content"),
             tool_calls=tool_calls,
+            content_parts=output_parts(
+                [
+                    {
+                        "type": "text",
+                        "text": message.content or "",
+                        "annotations": getattr(message, "annotations", []) or [],
+                    }
+                ]
+            ),
+            metadata={
+                "provider_output": provider_dump(message),
+                "refusal": getattr(message, "refusal", None),
+            },
         )
 
         return LLMResponse(
@@ -141,6 +154,10 @@ class OpenAIAdapter(BaseAdapter):
 
         delta = chunk.choices[0].delta
         result: dict[str, Any] = {
+            "provider_metadata": {
+                "provider_delta": provider_dump(delta),
+                "refusal_delta": getattr(delta, "refusal", None),
+            },
             "content": delta.content or "",
             "reasoning_content": self._get_extra_field(delta, "reasoning_content") or "",
             "finish_reason": chunk.choices[0].finish_reason,

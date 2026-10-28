@@ -292,11 +292,19 @@ class AsyncSubAgentMiddleware(Middleware):
         else:
             result = json.dumps({"ok": False, "error": f"Unknown tool: {tool_name}"})
 
-        return ToolMessage(
-            content=result,
-            tool_call_id=tc_id,
-            name=tool_name,
+        from wuwei.tools.outcome import ToolOutcome
+
+        payload = json.loads(result)
+        status = (
+            "unknown"
+            if payload.get("status") == "unknown"
+            else "error"
+            if payload.get("ok") is False
+            else "success"
         )
+        return ToolOutcome(
+            content=result, status=status, reconciliation=payload.get("reconciliation") or {}
+        ).to_message(tc_id, tool_name)
 
     async def _start_task(
         self,

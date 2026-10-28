@@ -546,9 +546,9 @@ async def test_tracing_resources_are_not_checkpoint_data_and_close_on_interrupt(
         MemoryCheckpointer(),
     )
     first = await ag.run("go")
-    assert first.status == "interrupted" and len(closed) == 2
+    assert first.status == "interrupted" and len(closed) == 3
     final = await ag.resume(first.interrupt)
-    assert final.status == "completed" and len(closed) == 4
+    assert final.status == "completed" and len(closed) == 6
 
 
 @pytest.mark.asyncio
