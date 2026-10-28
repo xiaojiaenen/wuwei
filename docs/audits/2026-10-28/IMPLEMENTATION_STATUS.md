@@ -39,3 +39,5 @@
 - 未知外部动作需要目的端证据/幂等策略；没有宣称跨系统exactly-once。
 
 使用入口：[持久运行](../../guides/durable-execution.md)、[模型契约](../../model-contracts.md)、[运行契约](../../runtime-contracts.md)、[质量与生命周期](../../guides/quality-and-lifecycle.md)。
+
+首次GitHub CI发现shell后代取消测试把Linux zombie当作仍在运行。取消验收现与已有timeout验收一致：检查后代真实进程状态，只接受已消失或已终止的Z状态；直接拥有的子进程仍要求wait完成后PID不可查。没有跳过测试或增加时间来掩盖运行中的进程。

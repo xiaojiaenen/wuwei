@@ -180,8 +180,21 @@ async def test_cancel_other_owned_subprocesses(driver, tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    if driver == "shell":
+        # The Python worker is a descendant, not our waitpid-owned direct child.
+        # Linux may retain its dead process-table entry until init reaps it.
+        import subprocess
+
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        assert not state or state.startswith("Z"), (
+            f"Cancelled shell descendant is still running: {state}"
+        )
+    else:
+        # This is the directly owned child; communicate() must have reaped it.
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 @pytest.mark.asyncio

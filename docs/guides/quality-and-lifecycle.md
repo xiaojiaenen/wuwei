@@ -58,8 +58,10 @@ not collected.
 ## Subprocess cancellation
 
 Local Python, shell, and Docker CLI communication kill and reap the owned local
-process group on timeout or cancellation on POSIX, then drain pipe readers before
-returning or propagating cancellation. Other platforms terminate the direct owned
+process group on timeout or cancellation on POSIX, then drain pipe readers and
+reap the directly owned process before returning or propagating cancellation.
+An orphaned descendant may briefly retain a zombie entry until the OS init process
+reaps it; that entry cannot execute and `kill(pid, 0)` alone does not prove liveness. Other platforms terminate the direct owned
 process. This is process cleanup, not a security isolation boundary.
 
 Each Docker run owns a private cidfile. On timeout or cancellation, cleanup uses
