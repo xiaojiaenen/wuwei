@@ -19,6 +19,7 @@ from ..types import (
     normalize_finish_reason,
 )
 from .base import BaseAdapter, make_client
+from .usage import parse_openai_usage
 
 
 class OpenAIAdapter(BaseAdapter):
@@ -31,7 +32,7 @@ class OpenAIAdapter(BaseAdapter):
         api_key: str,
         model: str = "gpt-4o",
         base_url: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = 0.2,
         max_tokens: int = 4096,
         client=None,
         client_factory=None,
@@ -82,7 +83,7 @@ class OpenAIAdapter(BaseAdapter):
             request["tools"] = [
                 tool.to_schema() if hasattr(tool, "to_schema") else tool for tool in tools
             ]
-        return request
+        return {k: v for k, v in request.items() if v is not None}
 
     async def call(self, request: dict[str, Any]) -> Any:
         return await self.client.chat.completions.create(**request)
@@ -166,17 +167,7 @@ class OpenAIAdapter(BaseAdapter):
     @staticmethod
     def _parse_usage(usage: Any) -> dict[str, int]:
         """统一解析 usage，避免不同端点返回 None 或缺字段时崩溃。"""
-        if usage is None:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        prompt = getattr(usage, "prompt_tokens", 0) or 0
-        completion = getattr(usage, "completion_tokens", 0) or 0
-        total = getattr(usage, "total_tokens", None)
-        total = total if total is not None else prompt + completion
-        return {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": total,
-        }
+        return parse_openai_usage(usage)
 
     @staticmethod
     def _get_extra_field(obj: Any, field_name: str) -> Any:

@@ -27,6 +27,35 @@ llm = LLMGateway({"provider": "openai", "client": client,
 
 框架自建 SDK client 默认关闭 SDK 重试，让网关负责分类重试。借入客户端也应明确 retry 所有权；否则 SDK 与框架尝试次数可能相乘。`set_fallback(other_gateway)` 借用完整 fallback 策略，调用方管理 other_gateway 生命周期。已发布流式内容、工具或 usage 元数据后不重放请求。确定性参数错误不做传输重试。
 
+## OpenAI Responses：缓存与新模型参数
+
+Responses 默认不发送 `temperature`，避免向不支持采样参数的模型强加旧默认值。显式配置数字仍会发送；`None` 表示省略，由服务端决定。Chat Completions 保留 `temperature=0.2` 兼容默认值；使用不支持该参数的模型时显式设为 `None`。
+
+```python
+import os
+from wuwei import LLMGateway
+
+llm = LLMGateway({
+    "provider": "responses",
+    "api_key": os.environ["OPENAI_API_KEY"],
+    "model": os.environ["OPENAI_MODEL"],
+    "max_output_tokens": 4096,
+    "prompt_cache_key": "wuwei:assistant:v1",
+    "prompt_cache_options": {"mode": "implicit", "ttl": "30m"},
+})
+# 使用完 await llm.aclose()。
+```
+
+缓存参数要求支持该能力的 OpenAI 模型和服务端；自定义兼容端点未必接受。模型名称不设硬编码白名单，`reasoning` 等提供商参数可透传，但具体参数组合仍须符合模型契约。缓存 key 仅为稳定路由提示，不保证命中，也不要放入密钥或敏感身份信息。
+
+上例采用隐式断点。`mode="explicit"` 需要额外的内容块断点；当前字符串消息入口不提供断点构建能力，不应只切换 mode 而期待缓存生效。请求级 TTL 与旧 `prompt_cache_retention` 含义不同，框架不会自动互相转换。
+
+Chat Completions 推理模型可配置 `temperature=None`、`max_completion_tokens=4096`；此时不会同时发送旧 `max_tokens`。`reasoning_effort` 等参数由模型决定是否支持，不通过模型名称猜测或静默删除显式配置。
+
+响应 `usage` 在服务端提供时包含 `cached_tokens`（缓存读取）、`cache_write_tokens`（缓存写入）、`reasoning_tokens`（推理输出）；普通运行、流式运行、子任务和规划汇总保留这些字段。缺失字段不伪造为已测量值。这些是输入/输出 token 的细分，不额外加到 `total_tokens`。
+
+预算仍按配置的输入/输出价格估算，不根据这些细分字段自动套用缓存折扣或写入附加费；需要精确账单时，以服务端账单为准。新模型应显式配置预算价格，避免使用通用估算价。
+
 ## 注册有参数契约的工具
 
 ```python

@@ -18,6 +18,7 @@ from ..types import (
     ToolCall,
 )
 from .base import BaseAdapter, make_client
+from .usage import parse_openai_usage
 
 
 class ResponsesAdapter(BaseAdapter):
@@ -30,7 +31,9 @@ class ResponsesAdapter(BaseAdapter):
         api_key: str,
         model: str = "gpt-4o",
         base_url: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = None,
+        prompt_cache_options: dict[str, Any] | None = None,
+        prompt_cache_key: str | None = None,
         max_output_tokens: int = 4096,
         client=None,
         client_factory=None,
@@ -43,6 +46,10 @@ class ResponsesAdapter(BaseAdapter):
         max_output_tokens = kwargs.pop("max_tokens", max_output_tokens)
         self.model = model
         self.default_params: dict[str, Any] = {k: v for k, v in kwargs.items() if v is not None}
+        if prompt_cache_options is not None:
+            self.default_params["prompt_cache_options"] = dict(prompt_cache_options)
+        if prompt_cache_key is not None:
+            self.default_params["prompt_cache_key"] = prompt_cache_key
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
 
@@ -125,7 +132,7 @@ class ResponsesAdapter(BaseAdapter):
             request["instructions"] = instructions
         if tools:
             request["tools"] = self._convert_tools(tools)
-        return request
+        return {k: v for k, v in request.items() if v is not None}
 
     async def call(self, request: dict[str, Any]) -> Any:
         return await self.client.responses.create(**request)
@@ -240,7 +247,7 @@ class ResponsesAdapter(BaseAdapter):
                 ]
             }
             usage = self._parse_usage(getattr(response, "usage", None))
-            if usage.get("total_tokens"):
+            if getattr(response, "usage", None) is not None:
                 result["usage"] = usage
             return result
 
@@ -250,14 +257,4 @@ class ResponsesAdapter(BaseAdapter):
 
     @staticmethod
     def _parse_usage(usage: Any) -> dict[str, int]:
-        if usage is None:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        prompt = getattr(usage, "input_tokens", 0) or 0
-        completion = getattr(usage, "output_tokens", 0) or 0
-        total = getattr(usage, "total_tokens", None)
-        total = total if total is not None else prompt + completion
-        return {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": total,
-        }
+        return parse_openai_usage(usage, responses=True)

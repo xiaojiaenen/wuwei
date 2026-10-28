@@ -310,7 +310,7 @@ class PlanExecutor:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         llm_calls = 0
         for u, calls in self._tasks_usage:
-            for k in usage:
-                usage[k] += u.get(k, 0)
+            for k, value in u.items():
+                usage[k] = usage.get(k, 0) + (value or 0)
             llm_calls += calls
         return usage, llm_calls

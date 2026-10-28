@@ -28,8 +28,8 @@ def _empty_usage():
 
 
 def _merge_usage(total, usage):
-    for key in total:
-        total[key] += (usage or {}).get(key, 0) or 0
+    for key, value in (usage or {}).items():
+        total[key] = total.get(key, 0) + (value or 0)
 
 
 class AgentRunner:
@@ -373,10 +373,8 @@ class AgentRunner:
                                     pending = chunk.tool_calls_complete
                                 if chunk.finish_reason:
                                     finish = chunk.finish_reason
-                                for key in call_usage:
-                                    call_usage[key] = max(
-                                        call_usage[key], (chunk.usage or {}).get(key, 0) or 0
-                                    )
+                                for key, value in (chunk.usage or {}).items():
+                                    call_usage[key] = max(call_usage.get(key, 0), value or 0)
                         finally:
                             close = getattr(result, "aclose", None)
                             if close:

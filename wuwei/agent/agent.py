@@ -333,10 +333,9 @@ class Agent(BaseSessionAgent):
                     before = metadata["llm_calls"]
                     tasks = await p.plan_task(goal)
                     if before == metadata["llm_calls"]:
-                        for key in metadata["usage_total"]:
-                            metadata["usage_total"][key] += (
-                                getattr(p, "last_usage", {}) or {}
-                            ).get(key, 0)
+                        for key, value in (getattr(p, "last_usage", {}) or {}).items():
+                            totals = metadata["usage_total"]
+                            totals[key] = totals.get(key, 0) + (value or 0)
                         metadata["llm_calls"] += getattr(p, "last_llm_calls", 0)
                 for task in tasks:
                     task.status = "pending"

@@ -110,7 +110,7 @@ class LLMGateway:
         adapter_kwargs: dict[str, Any] = {
             "api_key": config.get("api_key") or "missing",
             "model": config.get("model", spec["default_model"]),
-            "temperature": config.get("temperature", 0.2),
+            "temperature": config.get("temperature", None if provider == "responses" else 0.2),
         }
         if provider == "responses":
             adapter_kwargs["max_output_tokens"] = config.get(
