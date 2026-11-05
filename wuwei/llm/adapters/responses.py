@@ -132,6 +132,12 @@ class ResponsesAdapter(BaseAdapter):
         }
         if instructions:
             request["instructions"] = instructions
+        if stream:
+            # Request-scoped, so non-stream calls keep the SDK default Accept.
+            request["extra_headers"] = {
+                **(request.get("extra_headers") or {}),
+                "Accept": "text/event-stream",
+            }
         if tools:
             request["tools"] = self._convert_tools(tools)
         return {k: v for k, v in request.items() if v is not None}

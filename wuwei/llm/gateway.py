@@ -576,6 +576,7 @@ class LLMGateway:
         pending = {}
         usage = {}
         terminal = False
+        received = 0
         reasoning_blocks = {}
         active_reasoning_index = None
         provider_metadata = {}
@@ -584,6 +585,7 @@ class LLMGateway:
                 data = self.adapter.parse_stream_chunk(raw)
                 if not data:
                     continue
+                received += 1
                 if terminal and (
                     data.get("content")
                     or data.get("reasoning_content")
@@ -672,6 +674,12 @@ class LLMGateway:
                     usage_available=bool(usage),
                 )
             if not terminal:
+                if received == 0:
+                    raise ValueError(
+                        "Model stream produced no events: the endpoint likely ignored "
+                        "Accept: text/event-stream and returned a non-SSE body. "
+                        "Verify the gateway/proxy keeps this response as SSE."
+                    )
                 raise ValueError("Model stream ended without a terminal event")
         finally:
             close = getattr(stream, "close", None) or getattr(stream, "aclose", None)

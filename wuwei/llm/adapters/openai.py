@@ -79,6 +79,15 @@ class OpenAIAdapter(BaseAdapter):
         }
         if stream and "stream_options" not in request:
             request["stream_options"] = {"include_usage": True}
+        if stream:
+            # Some compatible gateways choose the response format from Accept and
+            # answer a streaming request with concatenated JSON, which the SSE
+            # decoder silently drops. The header is request-scoped so non-stream
+            # calls keep the SDK default.
+            request["extra_headers"] = {
+                **(request.get("extra_headers") or {}),
+                "Accept": "text/event-stream",
+            }
         if tools:
             request["tools"] = [
                 tool.to_schema() if hasattr(tool, "to_schema") else tool for tool in tools

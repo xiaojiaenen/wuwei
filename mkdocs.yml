@@ -145,6 +145,7 @@ nav:
     - 工具与运行状态: runtime-contracts.md
     - 持久会话与任务: guides/durable-execution.md
     - 评估与资源生命周期: guides/quality-and-lifecycle.md
+    - 流式会话锁租约（设计）: guides/stream-lock-lease.md
     - PyPI 发布: RELEASING.md
   - API 参考:
     - 模块索引: api/reference.md

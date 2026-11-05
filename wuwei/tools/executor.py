@@ -99,7 +99,12 @@ class ToolExecutor:
                     return_exceptions=True,
                 )
                 for idx, result in zip(batch_indices, batch_results):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
+                        # CancelledError and other BaseException subclasses must not be
+                        # flattened into tool payloads: flattening loses the cancellation
+                        # and puts a non-Message object into the result list.
+                        if not isinstance(result, Exception):
+                            raise result
                         results[idx] = self.build_error_message(
                             tool_calls[idx],
                             error_type=type(result).__name__,

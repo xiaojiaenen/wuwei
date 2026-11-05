@@ -15,6 +15,7 @@ uv.lock
 
 # IDE
 .idea/
+.workbuddy/
 
 # Local environment / OS files
 .DS_Store
