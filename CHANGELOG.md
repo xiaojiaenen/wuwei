@@ -1,7 +1,15 @@
 # 更新日志
 
-## 未发布 — 运行时可中断性与工具执行语义
+## 3.3.1 — 2026-11-05 · 流式兼容与运行时可中断性
 
+- 修复流式请求从不设置 `Accept` 头：SDK 默认发 `application/json`，按 Accept 门控响应格式
+  的兼容网关会返回裸 JSON，SSE 解码器得到 0 个事件，最终报出与根因无关的
+  "stream ended without a terminal event"。OpenAI/Responses 适配器改为仅在 `stream=True`
+  的请求上以请求级头强制 `Accept: text/event-stream`，不影响非流式路径；零事件流改报
+  可定位的错误。
+- 修复批处理用 `isinstance(result, Exception)` 判定失败：`asyncio.CancelledError` 属于
+  `BaseException`，取消时原始异常对象被塞进结果列表并在后续序列化时崩溃。改为普通异常
+  转工具错误消息，取消等 `BaseException` 原样向上传播。
 - 修复流式消费方中断后会话锁永久占用的 R-9：运行改为在任务中持锁，事件经有界队列转交；
   消费方消失（队列满且超时未读）时取消该次运行并落 `cancelled` 检查点。Agent 层的 store
   锁与租约同步改为任务持有，`stream_idle_timeout=None` 可退回旧行为。
