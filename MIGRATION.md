@@ -41,6 +41,24 @@ assert registry.get("count").parameters.required == ["values"]
 
 Code Mode 的嵌套工具必须有治理 callback；直接调用需要显式 `governed_execute`。这是可信进程内代码，不是 OS 沙箱。
 
+## 3.3 之后的运行语义调整
+
+- 工具超时只有"可能已产生副作用"才标 unknown：需同时声明 `side_effect=True` 且未声明
+  `idempotent=True`。声明幂等的写类工具超时后是普通失败，可以重试；未声明副作用也不会有
+  unknown。`tool.execution.idempotent` 是新增字段，默认 False，老代码行为不变。
+- `Tool.is_concurrency_safe` 默认值由 `True` 改为 `None`，表示按 `side_effect` 推导：写类工具
+  默认串行。原先依赖"未声明的写工具并发执行"的代码应显式设 `is_concurrency_safe=True`。
+- 工具批次并发度受 `ToolExecutor(max_concurrency=8)` 限制；单个工具输出超过
+  `max_output_chars`（默认 100k）会截断并标注。
+- 运行失败时也会收到 `done` / `run_end`（status=error），异常仍会抛给 `run()` 的调用方。
+  只认终止事件的客户端不再需要超时兜底。
+- 模型侧 SDK 异常统一为 `LLMError`（`details` 含 category/status_code，`__cause__` 保留原始异常）。
+  `ValueError` / `TypeError` / `TimeoutError` 仍按原类型抛出。
+- 事件流消费方中途停止读取时，运行会在 `Agent(stream_idle_timeout=30)` 秒后（队列持续写满）
+  被取消并落 `cancelled` 检查点。需要"一直等"的场景显式设 `stream_idle_timeout=None`。
+- 中断发生在工具派发之前时，该调用会补一条 `not_executed` 的工具结果并且不封锁会话；
+  只有真正进入执行的调用才进入 `unknown` 对账流程。
+
 自建 SDK client 默认 max_retries=0；借入 client 应关闭 SDK 重试或明确唯一重试所有者。模型 gateway 的 retry 和输出校验纠正是不同预算。MCP 的 http 与旧 sse 传输分开配置。
 
 ## 升级验证
