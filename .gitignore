@@ -31,3 +31,7 @@ site/
 agent_notes.txt
 .wuwei_sessions/
 .wuwei_demo_sessions/
+
+# pytest 临时目录（--basetemp）
+.pytest_tmp*/
+.pytest_*.log
