@@ -1,6 +1,6 @@
-# 流式会话锁租约（设计稿）
+# 流式会话锁租约
 
-状态：设计已定，待实现。对应问题清单 R-9。
+状态：已实现（`wuwei/runtime/stream_bridge.py`）。对应问题清单 R-9。
 
 ## 现象
 
@@ -57,3 +57,29 @@ stream_events()
 5. 超时判定只影响生产者，不影响正在执行的工具：工具执行到一半时消费者断连，等工具结果提交后再取消，避免制造新的 unknown。
 
 第 5 条是实现的难点，也是不能简单用"锁超时"代替的原因：锁超时会在工具执行中途释放锁，让第二个 run 进入同一会话，比挂死更糟。
+
+## 实现
+
+`bridge()` 把生产者放进任务，事件经 `queue(maxsize)` 传给消费者：
+
+| 位置 | 变化 |
+|---|---|
+| `AgentRunner._iter_events` | 改为 `bridge(self._locked_events(...))` |
+| `AgentRunner._locked_events` | 持锁运行，并在 `finally` 中 `aclose()` 内层生成器 |
+| `Agent._stream_session` | 同样改为 `bridge(...)`，让 store 锁与租约也归属任务 |
+| 配置 | `Agent(stream_idle_timeout=30.0)` / `AgentRunner(consumer_idle_timeout, event_queue_size)` |
+
+两处实现细节值得记住：
+
+1. **`async for` 不会关闭内层生成器**。`_locked_events` 在 yield 点被关闭时，`_execute_events`
+   只是被丢弃；若不在 `finally` 里显式 `aclose()`，它的取消分支会在锁释放之后才跑，与下一个
+   run 撞车。这是原实现就存在的隐患，桥接层顺手修掉了。
+2. **"准备中"不等于"已派发"**。`_execute_events` 在 `tool_states` 里先写 `preparing` 再落
+   `tool_running` 检查点，此时工具可能尚未派发。中断时若一律标 `unknown`，用户会为一个从未
+   执行过的工具被要求对账。实现里用 `dispatched_calls` 记录真正进入执行的调用：已派发的标
+   `unknown`（需对账），未派发的补一条 `not_executed` 工具结果（可安全重试），会话不被封死。
+
+## 未覆盖
+
+`consumer_idle_timeout=None` 退回旧的直接透传模式（锁仍由生成器持有），用于需要逐字节
+零缓冲的场景；该模式下 R-9 的风险仍然存在。

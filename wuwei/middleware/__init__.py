@@ -8,6 +8,7 @@ from wuwei.middleware.ledger import ContextLedger, LedgerMiddleware, ledger_tool
 from wuwei.middleware.logging import LoggingMiddleware
 from wuwei.middleware.memory import MemoryMiddleware
 from wuwei.middleware.rag import RagMiddleware
+from wuwei.middleware.repeat_guard import RepeatCallGuard
 from wuwei.middleware.stack import MiddlewareStack
 from wuwei.middleware.storage import StorageMiddleware
 
@@ -21,6 +22,7 @@ __all__ = [
     "MemoryMiddleware",
     "RagMiddleware",
     "ContextCompressionMiddleware",
+    "RepeatCallGuard",
     # Cost Governor
     "Budget",
     "BudgetExhausted",

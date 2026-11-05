@@ -30,6 +30,12 @@ class ToolExecutionPolicy(BaseModel):
     timeout_seconds: float | None = None
     side_effect: bool = False
     requires_approval: bool = False
+    idempotent: bool = False
+    """重复执行是否安全。
+
+    工具超时后无法确认它是否已经生效：声明 side_effect=True 且未声明幂等的工具
+    会被标为 unknown，要求人工对账后才能继续；声明幂等则标为失败并允许重试。
+    """
     retry_policy: ToolRetryPolicy = Field(default_factory=ToolRetryPolicy)
 
 
@@ -40,12 +46,18 @@ class Tool(BaseModel):
     handler: Callable[..., Any] | Callable[..., Awaitable[Any]]
     execution: ToolExecutionPolicy = Field(default_factory=ToolExecutionPolicy)
     display_name: str | None = None
-    is_concurrency_safe: bool = True
+    is_concurrency_safe: bool | None = None
     """是否可以在同一批次中与其他工具并发执行。
 
-    设为 False 的工具会串行执行。
-    读写文件的工具如果路径可能重叠，应设为 False。
+    None 表示按 side_effect 推导：无副作用工具并发，有副作用工具串行。
+    读写文件的工具如果路径可能重叠，应显式设为 False。
     """
+
+    @property
+    def concurrency_safe(self) -> bool:
+        if self.is_concurrency_safe is not None:
+            return self.is_concurrency_safe
+        return not self.execution.side_effect
 
     def to_schema(self) -> dict[str, Any]:
         return {

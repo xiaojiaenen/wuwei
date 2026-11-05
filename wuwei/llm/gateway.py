@@ -20,8 +20,9 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
+from ..core.errors import LLMError
 from ..tools import Tool
 from .adapters import AnthropicAdapter, OpenAIAdapter, ResponsesAdapter
 from .adapters.base import BaseAdapter
@@ -434,12 +435,15 @@ class LLMGateway:
                 remaining = self.timeout - (time.monotonic() - start)
                 if remaining <= 0:
                     raise TimeoutError("Model request overall deadline exceeded") from exc
-                async with asyncio.timeout(remaining):
-                    response = await self._fallback_gateway._generate_single(
-                        messages, tools, **kwargs
-                    )
+                try:
+                    async with asyncio.timeout(remaining):
+                        response = await self._fallback_gateway._generate_single(
+                            messages, tools, **kwargs
+                        )
+                except Exception as fallback_exc:
+                    self._raise_translated(fallback_exc)
             else:
-                raise
+                self._raise_translated(exc)
         response.latency_ms = int((time.monotonic() - start) * 1000)
         return response
 
@@ -472,6 +476,40 @@ class LLMGateway:
             "connection_error",
             "timeout",
         }
+
+    # Errors that already carry their own contract: our own types, and the
+    # programming errors raised by request building or by the caller.
+    _PASSTHROUGH_ERRORS = (LLMError, ValueError, TypeError, KeyError, TimeoutError)
+
+    @classmethod
+    def _as_llm_error(cls, exc: Exception) -> LLMError:
+        """Translate a provider/SDK failure into one type callers can classify."""
+        category = cls._classify_error(exc)
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        translated = LLMError(f"{type(exc).__name__}: {exc}")
+        translated.details = {
+            "category": category,
+            "status_code": status,
+            "error_type": type(exc).__name__,
+            "provider": cls.__name__,
+        }
+        translated.category = category
+        translated.status_code = status
+        translated.retryable = category in {
+            "rate_limit",
+            "server_error",
+            "connection_error",
+            "timeout",
+        }
+        return translated
+
+    @classmethod
+    def _raise_translated(cls, exc: Exception) -> NoReturn:
+        if isinstance(exc, cls._PASSTHROUGH_ERRORS):
+            raise exc
+        raise cls._as_llm_error(exc) from exc
 
     async def _backoff(self, exc, attempt):
         headers = getattr(getattr(exc, "response", None), "headers", {})
@@ -533,6 +571,14 @@ class LLMGateway:
         await self.aclose()
 
     async def _generate_stream(self, messages, tools, **kwargs):
+        """Stream with retries/fallback, always surfacing a classifiable error."""
+        try:
+            async for chunk in self._generate_stream_attempts(messages, tools, **kwargs):
+                yield chunk
+        except Exception as exc:
+            self._raise_translated(exc)
+
+    async def _generate_stream_attempts(self, messages, tools, **kwargs):
         observed = False
         start = time.monotonic()
         try:

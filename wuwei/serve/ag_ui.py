@@ -225,7 +225,7 @@ def map_agent_event(event: Any, state: _EventState) -> list[dict[str, Any]]:
             }
         )
 
-    # llm_start/llm_end/task_start/task_end 等内部事件不映射，静默跳过
+    # llm_start/llm_end 等内部事件不映射，静默跳过
     return out
 
 

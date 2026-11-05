@@ -7,6 +7,7 @@ replayed, and an approval consumes one exact call rather than skipping guards.
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
@@ -20,7 +21,10 @@ from wuwei.middleware.stack import MiddlewareStack
 from wuwei.runtime.action_log import get_or_create_log
 from wuwei.runtime.context import current_context
 from wuwei.runtime.interrupt import InterruptPayload, InterruptSignal
+from wuwei.runtime.stream_bridge import bridge
 from wuwei.tools.executor import bind_tool_execution
+
+logger = logging.getLogger(__name__)
 
 
 def _empty_usage():
@@ -42,6 +46,9 @@ class AgentRunner:
         middleware=None,
         checkpointer=None,
         event_bus=None,
+        *,
+        consumer_idle_timeout: float | None = 30.0,
+        event_queue_size: int = 64,
     ):
         self.llm = llm
         self.tools = tools  # compatible constructor; effective tools come from registry per call
@@ -50,6 +57,10 @@ class AgentRunner:
         self.middleware = middleware if middleware is not None else MiddlewareStack()
         self.checkpointer = checkpointer
         self.event_bus = event_bus
+        # A run owns the session lock; a consumer that stops reading must not keep
+        # it alive, so events cross a bounded queue (see runtime/stream_bridge.py).
+        self.consumer_idle_timeout = consumer_idle_timeout
+        self.event_queue_size = event_queue_size
         self._metadata = {}
         self._parent = None
         self.response_model = None
@@ -59,14 +70,15 @@ class AgentRunner:
         self.max_output_retries = 2
         self._resources = {}
         self._last_ctx = None
+        self._warned_serial_tools = False
 
-    async def run(self, user_input, stream=False, task=None):
+    async def run(self, user_input, stream=False):
         if stream:
-            return self._iter_events(user_input, stream=True, task=task)
-        return await self._collect(self._iter_events(user_input, stream=False, task=task))
+            return self._iter_events(user_input, stream=True)
+        return await self._collect(self._iter_events(user_input, stream=False))
 
-    def stream_events(self, user_input, *, task=None):
-        return self._iter_events(user_input, stream=True, task=task)
+    def stream_events(self, user_input):
+        return self._iter_events(user_input, stream=True)
 
     async def _collect(self, events):
         result = None
@@ -220,7 +232,27 @@ class AgentRunner:
         )
         return await self.resume(payload)
 
-    async def _iter_events(self, user_input, *, stream, task=None, resume=None):
+    async def _iter_events(self, user_input, *, stream, resume=None):
+        source = self._locked_events(user_input, stream=stream, resume=resume)
+        if self.consumer_idle_timeout is None:
+            async for event in source:
+                yield event
+            return
+        async for event in bridge(
+            source,
+            queue_size=self.event_queue_size,
+            idle_timeout=self.consumer_idle_timeout,
+            name=f"wuwei-run-{self.session.session_id}",
+        ):
+            yield event
+
+    async def _locked_events(self, user_input, *, stream, resume=None):
+        """Hold the session lock for the duration of the run, not of the caller.
+
+        The inner generator is closed explicitly: when this generator is closed
+        at its yield point, the ``async for`` below does not close it, and its
+        cancellation path would otherwise run after the lock was already freed.
+        """
         async with self.session.lock:
             if resume is None and self.session.metadata.get("_blocked_run"):
                 raise ValueError(
@@ -230,10 +262,12 @@ class AgentRunner:
                 raise ValueError(
                     "Session has an interrupted run; resume it before starting another run"
                 )
-            async for event in self._execute_events(
-                user_input, stream=stream, task=task, resume=resume
-            ):
-                yield event
+            events = self._execute_events(user_input, stream=stream, resume=resume)
+            try:
+                async for event in events:
+                    yield event
+            finally:
+                await events.aclose()
 
     def _ctx(self):
         meta = self._metadata
@@ -355,7 +389,7 @@ class AgentRunner:
             parent.metadata.setdefault("usage_records", []).append(record)
             parent = parent.config.get("parent_context")
 
-    async def _execute_events(self, user_input, *, stream, task=None, resume=None):
+    async def _execute_events(self, user_input, *, stream, resume=None):
         self._parent = current_context.get()
         run_id = uuid4().hex
         self._metadata = {
@@ -696,7 +730,6 @@ class AgentRunner:
             self._set_session_run_stats()
             ctx = self._ctx()
             await self._in_context(ctx, self.middleware.execute_on_error, ctx, exc)
-            await self._close_resources()
             await self._save_checkpoint(kind="error")
             yield self._event(
                 "error",
@@ -707,6 +740,18 @@ class AgentRunner:
                     "llm_calls": meta["llm_calls"],
                 },
             )
+            # A client that waits for a terminal event must not be left hanging just
+            # because the run failed; the exception still reaches programmatic callers.
+            data = self._result_payload(
+                str(exc), "error", termination_reason=type(exc).__name__
+            )
+            for middleware in reversed(self.middleware.middlewares):
+                hook = getattr(middleware, "after_run", None)
+                if hook:
+                    await hook(self._ctx(), data)
+            await self._close_resources()
+            yield self._event("done", data=dict(data))
+            yield self._event("run_end", data=dict(data))
             raise
 
     async def _close_background_tasks(self):
@@ -719,6 +764,20 @@ class AgentRunner:
 
     async def _finish(self, content, status, termination_reason=None, interrupt=None):
         await self._close_background_tasks()
+        if status != "interrupted":
+            self.session.metadata.pop("_pending_interrupt", None)
+        data = self._result_payload(content, status, termination_reason, interrupt)
+        if self._metadata["status"] != "interrupted":
+            await self._save_checkpoint(kind="final")
+        for middleware in reversed(self.middleware.middlewares):
+            hook = getattr(middleware, "after_run", None)
+            if hook:
+                await hook(self._ctx(), data)
+        await self._close_resources()
+        yield self._event("done", data=dict(data))
+        yield self._event("run_end", data=dict(data))
+
+    def _result_payload(self, content, status, termination_reason=None, interrupt=None):
         if self._metadata.get("unknown_tool"):
             status = "unknown"
             termination_reason = "tool_outcome_unknown"
@@ -727,16 +786,13 @@ class AgentRunner:
         if status == "unknown":
             self.session.metadata["_blocked_run"] = self._metadata["run_id"]
         self._set_session_run_stats()
-        if status != "interrupted":
-            self.session.metadata.pop("_pending_interrupt", None)
-            await self._save_checkpoint(kind="final")
         last_model = next(
             (m for m in reversed(self.session.context.get_messages()) if m.role == "assistant"),
             None,
         )
         final_parts = getattr(last_model, "content_parts", []) if last_model is not None else []
         final_metadata = dict(getattr(last_model, "metadata", {}) or {})
-        data = dict(
+        return dict(
             content=content,
             content_parts=[part.model_dump(mode="json") for part in final_parts],
             metadata=final_metadata,
@@ -749,13 +805,6 @@ class AgentRunner:
             usage_available=self._metadata.get("usage_available", True),
             output=self._metadata.get("structured_output"),
         )
-        for middleware in reversed(self.middleware.middlewares):
-            hook = getattr(middleware, "after_run", None)
-            if hook:
-                await hook(self._ctx(), data)
-        await self._close_resources()
-        yield self._event("done", data=dict(data))
-        yield self._event("run_end", data=dict(data))
 
     async def _run_tool_phase(self, *, ctx, tool_calls):
         self._metadata["unresolved_calls"] = [tc.model_dump(mode="json") for tc in tool_calls]
@@ -768,11 +817,29 @@ class AgentRunner:
             and not self.middleware._after_tool_mws
             and len(tool_calls) > 1
         )
+        if (
+            not can_batch
+            and self.session.parallel_tool_calls
+            and len(tool_calls) > 1
+            and (self.middleware._before_tool_mws or self.middleware._after_tool_mws)
+            and not self._warned_serial_tools
+        ):
+            # Approval and sub-agent hooks decide per call and must see the previous
+            # result, so they cannot run as a batch. Say so once instead of silently
+            # ignoring the caller's parallel_tool_calls setting.
+            self._warned_serial_tools = True
+            logger.warning(
+                "parallel_tool_calls ignored: %d before_tool / %d after_tool middleware(s) "
+                "run per call, so tool calls in this session execute serially",
+                len(self.middleware._before_tool_mws),
+                len(self.middleware._after_tool_mws),
+            )
         if can_batch:
             for tc in tool_calls:
                 yield self._tool_start_event(tc)
             for tc in tool_calls:
                 self._metadata["tool_states"][tc.id] = "running"
+            self._note_dispatched(tc.id for tc in tool_calls)
             await self._save_checkpoint(kind="tool_running", pending=tool_calls)
             results = await self.tool_executor.execute(tool_calls, concurrent=True)
             self._metadata["batch_results"] = {
@@ -794,6 +861,10 @@ class AgentRunner:
                 continue
             self._metadata["tool_states"][tc.id] = "preparing"
             await self._save_checkpoint(kind="tool_running", pending=remaining)
+            if self._guard_dispatches_tools():
+                # A tool-handler middleware runs the tool inside before_tool, so the
+                # call is in flight from here on; without one it is not dispatched yet.
+                self._note_dispatched([tc.id])
             try:
                 result = await self._in_context(ctx, self.middleware.execute_before_tool, ctx, tc)
             except InterruptSignal as sig:
@@ -820,6 +891,7 @@ class AgentRunner:
             yield self._tool_start_event(tc)
             if getattr(result, "role", None) != "tool":
                 self._metadata["tool_states"][tc.id] = "running"
+                self._note_dispatched([tc.id])
                 await self._save_checkpoint(kind="tool_running", pending=remaining)
 
                 async def nested(nested_tc):
@@ -926,20 +998,80 @@ class AgentRunner:
                 ]
                 break
 
+    def _guard_dispatches_tools(self) -> bool:
+        return any(
+            getattr(mw, "is_tool_handler", False)
+            for mw in getattr(self.middleware, "_before_tool_mws", ())
+        )
+
+    def _note_dispatched(self, call_ids):
+        dispatched = self._metadata.setdefault("dispatched_calls", [])
+        for call_id in call_ids:
+            if call_id not in dispatched:
+                dispatched.append(call_id)
+
     def _block_uncertain_tools(self):
+        """Close out every pending call so the history stays valid.
+
+        A call that was dispatched may have run: mark it unknown and require
+        reconciliation. A call that never reached dispatch cannot have run, so it
+        is recorded as not executed — marking it unknown would block the session
+        and demand evidence for a tool that was never called.
+        """
         cached = self._metadata.get("batch_results", {})
-        for call_id, state in self._metadata.get("tool_states", {}).items():
-            if state in ("running", "preparing") and call_id not in cached:
+        dispatched = set(self._metadata.get("dispatched_calls", []))
+        unresolved = list(self._metadata.get("unresolved_calls", []))
+        blocked = False
+        for saved in unresolved:
+            call_id = saved["id"]
+            if call_id in cached:
+                continue
+            state = self._metadata.get("tool_states", {}).get(call_id)
+            if state == "unknown":
+                blocked = True
+                continue
+            if state in ("running", "preparing") and call_id in dispatched:
                 self._metadata["tool_states"][call_id] = "unknown"
-                self.session.metadata["_blocked_run"] = self._metadata.get("run_id")
                 self._metadata["unknown_tool"] = True
-                parent = self._parent
-                while parent is not None:
-                    parent.metadata["unknown_tool"] = True
-                    parent_session = parent.config.get("session")
-                    if parent_session is not None:
-                        parent_session.metadata["_blocked_run"] = parent.metadata.get("run_id")
-                    parent = parent.config.get("parent_context")
+                blocked = True
+                continue
+            self._record_not_executed(saved)
+        if blocked:
+            self.session.metadata["_blocked_run"] = self._metadata.get("run_id")
+            parent = self._parent
+            while parent is not None:
+                parent.metadata["unknown_tool"] = True
+                parent_session = parent.config.get("session")
+                if parent_session is not None:
+                    parent_session.metadata["_blocked_run"] = parent.metadata.get("run_id")
+                parent = parent.config.get("parent_context")
+
+    def _record_not_executed(self, saved_call):
+        call_id = saved_call["id"]
+        name = saved_call.get("function", {}).get("name", "")
+        message = ToolMessage(
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "not_executed",
+                        "message": "运行在工具开始执行前中断，该工具未执行，可安全重试",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            tool_call_id=call_id,
+            name=name,
+            status="error",
+            metadata={"tool_outcome": {"status": "error", "executed": False}},
+        )
+        self.session.context.get_messages().append(message)
+        self._metadata["tool_states"][call_id] = "error"
+        self._metadata["unresolved_calls"] = [
+            call for call in self._metadata.get("unresolved_calls", []) if call["id"] != call_id
+        ]
+        self._metadata["approval_decisions"].pop(call_id, None)
+        self._metadata.get("batch_results", {}).pop(call_id, None)
 
     @staticmethod
     def _to_core_tool_message(msg, tc):

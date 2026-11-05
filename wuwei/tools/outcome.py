@@ -12,12 +12,14 @@ class ToolOutcome(BaseModel):
     retryable: bool = False
     reconciliation: dict[str, Any] = Field(default_factory=dict)
 
-    def to_message(self, call_id: str, name: str):
+    def to_message(self, call_id: str, name: str, limit: int | None = None):
         from wuwei.core.message import ToolMessage
-        from wuwei.tools.executor import ToolExecutor
+        from wuwei.tools.executor import DEFAULT_MAX_OUTPUT_CHARS, serialize_tool_output
 
         return ToolMessage(
-            content=ToolExecutor.serialize_output(None, self.content),
+            content=serialize_tool_output(
+                self.content, DEFAULT_MAX_OUTPUT_CHARS if limit is None else limit
+            ),
             tool_call_id=call_id,
             name=name,
             status="success" if self.status == "success" else "error",

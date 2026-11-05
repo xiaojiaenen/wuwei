@@ -11,6 +11,7 @@ from wuwei.llm import AgentEvent, LLMGateway, Message
 from wuwei.plugin import Plugin, PluginContext, PluginManager
 from wuwei.plugin.builtin import BUILTIN_GROUPS, load_builtin
 from wuwei.runtime.agent_runner import AgentRunner
+from wuwei.runtime.stream_bridge import bridge
 from wuwei.tools import Tool, ToolRegistry
 
 ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
@@ -82,6 +83,7 @@ class Agent(BaseSessionAgent):
         session_store=None,
         deps=None,
         owns_llm: bool = False,
+        stream_idle_timeout: float | None = 30.0,
     ) -> None:
         """初始化 Agent。
 
@@ -94,6 +96,8 @@ class Agent(BaseSessionAgent):
             checkpointer: 检查点后端（MemoryCheckpointer / SQLiteCheckpointer），
                 启用后每步落检查点，HITL interrupt 模式与 resume() 依赖它
             event_bus: EventBus 订阅总线，所有 AgentEvent 发布到总线
+            stream_idle_timeout: 事件流消费方多久不读（队列已满）就判定其已离开，
+                取消该次运行并释放会话锁；None 表示一直等（旧行为）
         """
         super().__init__(
             llm=llm,
@@ -145,6 +149,7 @@ class Agent(BaseSessionAgent):
         self.session_store = session_store
         self.deps = deps
         self.owns_llm = owns_llm
+        self.stream_idle_timeout = stream_idle_timeout
         self._store_locks = {}
         self._closed = False
         self._active_runs = 0
@@ -166,6 +171,7 @@ class Agent(BaseSessionAgent):
             middleware=self.middleware,
             checkpointer=self.checkpointer,
             event_bus=self.event_bus,
+            consumer_idle_timeout=self.stream_idle_timeout,
         )
         runner.deps = self.deps
         return runner
@@ -419,19 +425,29 @@ class Agent(BaseSessionAgent):
             self._active_runs -= 1
 
     async def _stream_session(self, user_input, session):
-        terminal = None
-        async with self._session_scope(session):
-            events = self.create_runner(session).stream_events(user_input)
-            try:
-                async for event in events:
-                    if event.type == "run_end":
-                        terminal = event
-                    else:
-                        yield event
-            finally:
-                await events.aclose()
-        if terminal is not None:
-            yield terminal
+        async def produce():
+            terminal = None
+            async with self._session_scope(session):
+                events = self.create_runner(session).stream_events(user_input)
+                try:
+                    async for event in events:
+                        if event.type == "run_end":
+                            terminal = event
+                        else:
+                            yield event
+                finally:
+                    await events.aclose()
+            if terminal is not None:
+                yield terminal
+
+        # The store lock and lease live in the producer task: a consumer that
+        # stops reading can no longer pin them (same hazard as the session lock).
+        async for event in bridge(
+            produce(),
+            idle_timeout=self.stream_idle_timeout,
+            name=f"wuwei-stream-{session.session_id}",
+        ):
+            yield event
 
     async def load_session(self, session_id: str):
         if session_id in self._sessions:

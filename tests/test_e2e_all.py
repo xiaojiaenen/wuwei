@@ -256,9 +256,10 @@ async def test_tool_system():
     assert error is not None
     assert "not found" in error.lower() or "nonexistent" in error.lower()
 
-    # 测试 is_concurrency_safe 标记
+    # 测试 is_concurrency_safe 标记（未显式声明时按 side_effect 推导）
     safe_tool = registry.get("add_tool")
-    assert safe_tool.is_concurrency_safe is True
+    assert safe_tool.is_concurrency_safe is None
+    assert safe_tool.concurrency_safe is True
 
     print("  ✅ Tool System: 注册 + 执行 + 并发 + 错误处理 全部通过")
 

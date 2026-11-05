@@ -67,8 +67,6 @@ AgentEventType = Literal[
     "tool_start",
     "tool_end",
     "tool_error",
-    "task_start",
-    "task_end",
     "approval_required",
     "done",
     "error",
