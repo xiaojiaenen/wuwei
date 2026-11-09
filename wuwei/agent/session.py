@@ -46,13 +46,20 @@ class AgentSession:
         self.last_llm_calls = 0
 
     def to_dict(self) -> dict:
-        from wuwei.runtime.action_log import ACTION_LOG_KEY, ActionLog
+        from wuwei.runtime.action_log import (
+            ACTION_LOG_KEY,
+            ACTION_LOG_TYPE,
+            coerce_action_log,
+        )
 
         metadata = dict(self.metadata)
-        if isinstance(metadata.get(ACTION_LOG_KEY), ActionLog):
+        value = metadata.get(ACTION_LOG_KEY)
+        if value is not None:
+            # 写侧一律规范化成带标记的形态。旧 checkpoint 里可能残留裸 dict，
+            # 若原样再写回去，类型信息会一直丢下去。
             metadata[ACTION_LOG_KEY] = {
-                "__type__": "ActionLog",
-                "value": metadata[ACTION_LOG_KEY].to_dict(),
+                "__type__": ACTION_LOG_TYPE,
+                "value": coerce_action_log(value).to_dict(),
             }
         return {
             "schema_version": 1,
@@ -92,9 +99,11 @@ class AgentSession:
         }
         session.last_latency_ms = data.get("last_latency_ms", 0)
         session.last_llm_calls = data.get("last_llm_calls", 0)
-        from wuwei.runtime.action_log import ACTION_LOG_KEY, ActionLog
+        from wuwei.runtime.action_log import ACTION_LOG_KEY, coerce_action_log
 
-        log = session.metadata.get(ACTION_LOG_KEY)
-        if isinstance(log, dict) and log.get("__type__") == "ActionLog":
-            session.metadata[ACTION_LOG_KEY] = ActionLog.from_dict(log["value"])
+        # 与 get_or_create_log 共用同一个收敛入口，避免两处反序列化逻辑漂移。
+        # 旧的（3.2 前）无标记快照在这里一并还原，不用等到第一次 append 才炸。
+        value = session.metadata.get(ACTION_LOG_KEY)
+        if value is not None:
+            session.metadata[ACTION_LOG_KEY] = coerce_action_log(value)
         return session

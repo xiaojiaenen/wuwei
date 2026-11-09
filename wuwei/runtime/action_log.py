@@ -13,11 +13,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 ACTION_LOG_KEY = "action_log"
+ACTION_LOG_TYPE = "ActionLog"
+
+__all__ = [
+    "ACTION_LOG_KEY",
+    "ACTION_LOG_TYPE",
+    "ActionEntry",
+    "ActionLog",
+    "coerce_action_log",
+    "get_or_create_log",
+]
 
 
 @dataclass
@@ -97,7 +108,8 @@ class ActionLog:
         if query:
             q = query.lower()
             matched = [
-                e for e in matched
+                e
+                for e in matched
                 if q in e.summary.lower()
                 or q in json.dumps(e.data, ensure_ascii=False, default=str).lower()
             ]
@@ -108,6 +120,29 @@ class ActionLog:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ActionLog:
+        """还原日志快照。
+
+        历史上存在两种落盘形态，都必须认：
+
+        - ``{"__type__": "ActionLog", "value": {"entries": [...]}}``
+          —— ``AgentSession.to_dict`` 从 3.2 起写的带标记形态；
+        - ``{"entries": [...]}`` —— 直接调 ``ActionLog.to_dict()`` 得到的裸形态，
+          旧 checkpoint 与外部写入方都可能是这个。
+
+        只认裸形态的话，把带标记的 dict 喂进来会得到 ``entries=[]``，
+        历史被静默清空 —— 比崩在 append 上更难发现，所以宁可报错也不猜。
+        """
+        if not isinstance(data, dict):
+            raise TypeError(f"ActionLog 快照需要 dict，实际是 {type(data).__name__}")
+
+        payload = data
+        if data.get("__type__") == ACTION_LOG_TYPE:
+            payload = data.get("value")
+            if not isinstance(payload, dict):
+                raise ValueError("ActionLog 快照的 value 字段不是 dict")
+        if payload and "entries" not in payload:
+            raise ValueError("ActionLog 快照缺少 entries 字段，拒绝按空日志静默处理")
+
         entries = [
             ActionEntry(
                 run_id=e.get("run_id", ""),
@@ -119,7 +154,7 @@ class ActionLog:
                 timestamp=e.get("timestamp", ""),
                 data=e.get("data") or {},
             )
-            for e in data.get("entries", [])
+            for e in payload.get("entries", [])
         ]
         return cls(entries)
 
@@ -127,10 +162,36 @@ class ActionLog:
         return len(self.entries)
 
 
+def coerce_action_log(value: Any) -> ActionLog:
+    """把 ``metadata[action_log]`` 的任意历史形态收敛成 ActionLog 实例。
+
+    ``session.metadata`` 是跨持久化的无类型边界：正常路径由
+    ``AgentSession.to_dict / from_dict`` 用 ``__type__`` 标记还原，但
+    3.2 之前的 checkpoint 没有标记，第三方 SessionStore、外部代码、
+    手工构造的 session 也可能直接塞一个裸 dict 进来。写侧再规范，
+    读侧也不能假设拿到的类型 —— 这里就是唯一的收敛点。
+    """
+    if isinstance(value, ActionLog):
+        return value
+    if value is None:
+        return ActionLog()
+    if isinstance(value, Mapping):
+        return ActionLog.from_dict(dict(value))
+    raise TypeError(
+        f"session.metadata['{ACTION_LOG_KEY}'] 期望 ActionLog / dict / None，"
+        f"实际是 {type(value).__name__}；请检查 checkpoint 版本或写入方"
+    )
+
+
 def get_or_create_log(session) -> ActionLog:
-    """从 session.metadata 取（或创建）会话级 Action Log。"""
-    log = session.metadata.get(ACTION_LOG_KEY)
-    if log is None:
-        log = ActionLog()
+    """从 session.metadata 取（或创建）会话级 Action Log。
+
+    无论新建、还原还是原样返回，都把实例回填 metadata：不回填的话，
+    每次调用都要重跑一次全量反序列化，而且同一会话里可能拿到不同实例，
+    子代理写入的记录会丢。
+    """
+    current = session.metadata.get(ACTION_LOG_KEY)
+    log = coerce_action_log(current)
+    if log is not current:
         session.metadata[ACTION_LOG_KEY] = log
     return log

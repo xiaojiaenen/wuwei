@@ -1,5 +1,23 @@
 # 更新日志
 
+## 未发布
+
+- 修复从旧/外部 checkpoint 恢复后 `ActionLog` 退化为普通 dict、首次 `append` 抛
+  `AttributeError`，导致 agent 工具调用后静默无最终回复的问题。
+  - 归因订正：`graph/checkpoint.py` 的 `dict(metadata)` 处理的是 checkpoint 级元数据
+    （`run_id` / `parent_checkpoint_id`），不是 `session.metadata`。后者从 3.2 起就由
+    `AgentSession.to_dict/from_dict` 用 `__type__` 标记还原，正常恢复路径不复现。
+  - 缺陷本体在读侧入口 `get_or_create_log` 只认 `None`：3.2 前的无标记快照、
+    第三方 SessionStore、外部代码写入的裸 dict 会被原样放行。
+  - 新增 `coerce_action_log` 作为唯一类型收敛点，同时识别带标记形态与裸形态；
+    未知形态在入口报 `TypeError`，不再拖到工具执行收尾才崩。
+  - `ActionLog.from_dict` 兼容两种落盘形态（只认裸形态会把带标记 dict 当成空日志，
+    静默丢历史）；`AgentSession.to_dict/from_dict` 与 `get_or_create_log` 共用同一入口，
+    写侧也规范化，避免脏形态在快照之间一直传下去。
+  - `get_or_create_log` 回填实例，避免每次重跑全量反序列化、子代理写到不同实例。
+- 测试：新增 `tests/test_action_log_restore.py`（17 条），覆盖官方往返、旧 checkpoint、
+  裸 dict、带标记 dict、identity 回填与异常形态。
+
 ## 3.3.1 — 2026-11-05 · 流式兼容与运行时可中断性
 
 - 修复流式请求从不设置 `Accept` 头：SDK 默认发 `application/json`，按 Accept 门控响应格式
