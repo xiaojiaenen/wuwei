@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## 3.3.2 — 2026-11-09 · ActionLog 恢复类型收敛
 
 - 修复从旧/外部 checkpoint 恢复后 `ActionLog` 退化为普通 dict、首次 `append` 抛
   `AttributeError`，导致 agent 工具调用后静默无最终回复的问题。

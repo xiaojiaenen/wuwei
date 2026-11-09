@@ -1,5 +1,13 @@
 # 更新日志
 
+## 3.3.2 — 2026-11-09 · ActionLog 恢复类型收敛
+
+- 修复旧/外部 checkpoint 恢复后 `ActionLog` 退化成 dict、工具执行后 `append` 抛 `AttributeError` 导致 agent 无最终回复的问题。
+- 新增 `coerce_action_log` 作为唯一类型收敛点：兼容带 `__type__` 标记与裸 `entries` 两种落盘形态，未知类型在入口报 `TypeError`；`get_or_create_log` 回填实例。
+- `ActionLog.from_dict` 与 `AgentSession.to_dict/from_dict` 共用该入口，避免脏形态在快照间传递或带标记形态被误判为空日志。
+- 归因订正：`graph/checkpoint.py` 的 `dict(metadata)` 处理 checkpoint 级元数据，不是 `session.metadata`；官方恢复路径自 3.2 起已有反序列化协议，本次不改该文件。
+- 新增 `tests/test_action_log_restore.py`（17 条）覆盖官方往返、旧 checkpoint、裸 dict、带标记 dict 与异常形态。
+
 ## 3.3.1 — 2026-11-05 · 流式兼容与运行时可中断性
 
 - 修复流式请求未设置 `Accept: text/event-stream` 导致按 Accept 门控的网关返回裸 JSON、SSE 解析出 0 个事件；零事件流改为可定位的报错。
