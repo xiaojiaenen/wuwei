@@ -36,6 +36,37 @@ def _merge_usage(total, usage):
         total[key] = total.get(key, 0) + (value or 0)
 
 
+STRUCTURED_SCHEMA_MARKER = "只输出符合以下JSON Schema的JSON对象："
+
+
+def _attach_structured_schema(messages, schema) -> None:
+    """把结构化输出约束并入首条 system 消息。
+
+    不能 ``insert(0, SystemMessage(...))``：会话第 0 条已经是 system prompt，
+    再插一条就形成相邻两条 system，OpenAI 兼容端点（DeepSeek / vLLM / 各类
+    网关）会直接 400 ``System message must be at the beginning``。
+
+    合并而非新增还有两个好处：system 条数与顺序不变，prompt caching 的前缀
+    保持稳定；注入的说明不会随轮次累加。重复调用是幂等的。
+    """
+    from wuwei.core.message import SystemMessage
+
+    text = STRUCTURED_SCHEMA_MARKER + json.dumps(schema, ensure_ascii=False)
+    if not messages:
+        messages.append(SystemMessage(content=text))
+        return
+    head = messages[0]
+    if head.role != "system":
+        # 没有可合并的 system（调用方自建上下文）时才新增，且必须放在首位。
+        messages.insert(0, SystemMessage(content=text))
+        return
+    if STRUCTURED_SCHEMA_MARKER in (head.content or ""):
+        return
+    head.content = f"{head.content}\n\n{text}" if head.content else text
+    # 首条 system 若带多模态块，字符串追加到 content 后 provider 会把它当文本块发，
+    # 这里无需重排 content_parts。
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -479,15 +510,7 @@ class AgentRunner:
                 if not pending:
                     ctx = await self._in_context(ctx, self.middleware.execute_before_llm, ctx)
                     if meta.get("structured_schema") and self.output_spec is None:
-                        from wuwei.core.message import SystemMessage
-
-                        ctx.state.messages.insert(
-                            0,
-                            SystemMessage(
-                                content="只输出符合以下JSON Schema的JSON对象："
-                                + json.dumps(meta["structured_schema"], ensure_ascii=False)
-                            ),
-                        )
+                        _attach_structured_schema(ctx.state.messages, meta["structured_schema"])
                     effective_tools = self.tool_executor.registry.list_tools()
                     yield self._event(
                         "llm_start", data={"tools": [t.name for t in effective_tools]}
@@ -701,7 +724,10 @@ class AgentRunner:
             else:
                 status = "incomplete"
                 termination_reason = "max_steps"
-                final_content = "任务未完成，已达到最大步骤限制。"
+                final_content = (
+                    f"任务未完成，已达到最大步骤限制（{self.session.max_steps} 步）。"
+                    "如需继续，请提高 max_steps 或把任务拆小。"
+                )
                 self.session.context.add_ai_message(final_content)
                 yield self._event("text_delta", data={"content": final_content})
             async for event in self._finish(
@@ -801,6 +827,8 @@ class AgentRunner:
             llm_calls=self._metadata["llm_calls"],
             status=status,
             termination_reason=termination_reason,
+            steps_used=self._metadata.get("step_index", 0),
+            max_steps=self.session.max_steps,
             interrupt=interrupt,
             usage_available=self._metadata.get("usage_available", True),
             output=self._metadata.get("structured_output"),

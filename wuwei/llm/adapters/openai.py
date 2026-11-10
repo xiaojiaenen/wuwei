@@ -22,6 +22,50 @@ from .base import BaseAdapter, make_client, output_parts, provider_dump
 from .usage import parse_openai_usage
 
 
+def _coalesce_system_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把开头的多条 system 合并成一条，保证 system 唯一且在首位。
+
+    Chat Completions 协议要求 system 出现在最前面；严格实现的端点（DeepSeek、
+    vLLM、多数内网网关）还要求它唯一，遇到相邻两条直接 400。框架里 RAG、
+    记忆、结构化输出等中间件都会向消息视图注入 system，合并放在适配器边界，
+    任何注入源都不必各自保证顺序。
+
+    Anthropic 与 Responses 适配器一直是这样处理的，这里补齐 OpenAI 一侧。
+    只合并开头连续的一段：出现在对话中段的 system 属于调用方有意为之，
+    合并会改变语义，原样透传让端点自己报错更有助于定位。
+    """
+    head: list[dict[str, Any]] = []
+    rest_start = 0
+    for index, message in enumerate(messages):
+        if message.get("role") != "system":
+            rest_start = index
+            break
+        head.append(message)
+        rest_start = index + 1
+    if len(head) <= 1:
+        return messages
+
+    texts: list[str] = []
+    for message in head:
+        content = message.get("content")
+        if isinstance(content, list):
+            # 多模态 system（文本块 + 图片块）：只合并文本，其余块按序保留。
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    if block.get("text"):
+                        texts.append(block["text"])
+                elif isinstance(block, str) and block:
+                    texts.append(block)
+        elif content:
+            texts.append(str(content))
+
+    merged: dict[str, Any] = {"role": "system", "content": "\n\n".join(texts)}
+    name = next((m.get("name") for m in head if m.get("name")), None)
+    if name:
+        merged["name"] = name
+    return [merged, *messages[rest_start:]]
+
+
 class OpenAIAdapter(BaseAdapter):
     """OpenAI Chat Completions 协议适配器（含兼容端点）。"""
 
@@ -69,6 +113,7 @@ class OpenAIAdapter(BaseAdapter):
             else:
                 m.pop("reasoning_content", None)
             openai_messages.append(m)
+        openai_messages = _coalesce_system_messages(openai_messages)
 
         request: dict[str, Any] = {
             "model": self.model,

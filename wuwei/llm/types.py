@@ -100,4 +100,7 @@ class AgentRunResult(BaseModel):
     )
     interrupt: dict[str, Any] | None = None
     termination_reason: str | None = None
+    # 达到 max_steps 等截断场景，调用方据此程序化判断「被截断」而不是匹配文案。
+    steps_used: int = 0
+    max_steps: int | None = None
     output: Any = None
