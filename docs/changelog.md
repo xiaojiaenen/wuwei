@@ -1,5 +1,13 @@
 # 更新日志
 
+## 3.3.3 — 2026-11-10 · 结构化输出与 system 消息
+
+- 修复结构化输出（`response_model` / `output_spec` 的 JSON 提示路径）把 schema 说明插到消息最前面、与会话原有 system prompt 形成相邻两条 system，被 OpenAI 兼容端点（DeepSeek / vLLM / 内网网关）以 `400 System message must be at the beginning` 拒绝的问题。
+- 注入改为并入首条 system 消息，system 条数与顺序不变、prompt 前缀稳定、重复注入幂等；OpenAI 适配器边界补齐开头连续 system 的合并（Anthropic / Responses 一直如此），覆盖 RAG、记忆等中间件注入源，对话中段 system 保持原样。
+- 归因订正：注入只作用于本轮 LLM 调用的消息视图，不写入会话历史、不随轮次累加，历史始终只有一条 system。
+- `AgentRunResult` 新增 `steps_used` / `max_steps`，`max_steps` 截断可程序化判断，不必匹配 content 文案。
+- 新增 `tests/test_structured_system_message.py`（20 条）。
+
 ## 3.3.2 — 2026-11-09 · ActionLog 恢复类型收敛
 
 - 修复旧/外部 checkpoint 恢复后 `ActionLog` 退化成 dict、工具执行后 `append` 抛 `AttributeError` 导致 agent 无最终回复的问题。

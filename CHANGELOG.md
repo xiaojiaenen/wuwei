@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## 3.3.3 — 2026-11-10 · 结构化输出与 system 消息
 
 - 修复结构化输出（`response_model` / `output_spec` 的 JSON 提示路径）把 schema 说明
   `insert(0, SystemMessage(...))` 到消息视图最前面，与会话原有 system prompt 形成
