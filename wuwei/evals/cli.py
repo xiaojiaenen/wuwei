@@ -39,7 +39,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _force_utf8_stdio():
+    """Windows 控制台默认 cp1252，中文评估报告会 UnicodeEncodeError。"""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # pragma: no cover
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

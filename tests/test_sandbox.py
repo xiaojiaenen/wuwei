@@ -247,7 +247,9 @@ def _docker_daemon_available() -> bool:
 DOCKER_AVAILABLE = _docker_daemon_available()
 
 docker_needed = pytest.mark.skipif(
-    not DOCKER_AVAILABLE, reason="docker 不可用（未安装或守护进程未启动）"
+    not DOCKER_AVAILABLE or sys.platform == "win32",
+    reason="docker 不可用（未安装或守护进程未启动）；Windows runner 为 Windows 容器模式，"
+    "无法运行 Linux 镜像 python:3.12-slim",
 )
 
 

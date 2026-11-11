@@ -192,7 +192,7 @@ class LocalPythonDriver:
                         f.write(content)
 
             return await self._communicate(
-                [self.python_executable, "-I", "-"],
+                [self.python_executable, "-I", "-X", "utf8", "-"],
                 code.encode("utf-8"),
                 timeout=timeout,
                 cwd=workdir,

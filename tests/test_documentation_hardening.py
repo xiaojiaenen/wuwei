@@ -9,7 +9,7 @@ PUBLIC += [p for p in (ROOT / 'docs').rglob('*.md') if not {'audits', 'superpowe
 
 
 def test_offline_documentation_examples():
-    source = (ROOT / 'docs/examples/offline.md').read_text()
+    source = (ROOT / 'docs/examples/offline.md').read_text(encoding='utf-8')
     blocks = re.findall(r'```python\n(.*?)```', source, re.S)
     assert len(blocks) >= 4
     for index, block in enumerate(blocks):
@@ -19,7 +19,7 @@ def test_offline_documentation_examples():
 def test_public_import_examples():
     import ast
     for path in PUBLIC:
-        for block in re.findall(r'```python[^\n]*\n(.*?)```', path.read_text(), re.S):
+        for block in re.findall(r'```python[^\n]*\n(.*?)```', path.read_text(encoding='utf-8'), re.S):
             tree = ast.parse(block)
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('wuwei'):
@@ -32,7 +32,7 @@ def test_public_markdown_links_and_removed_api_examples():
     forbidden = ('PluginLoader', 'PluginRegistry', 'graph.channels', 'SkillViewerTool',
                  'Tool.from_function', '业界无开源对标')
     for path in PUBLIC:
-        source = path.read_text()
+        source = path.read_text(encoding='utf-8')
         for old in forbidden:
             assert old not in source, (path, old)
         for target in re.findall(r'\[[^\]]*\]\(([^\s)]+)', source):
@@ -43,6 +43,6 @@ def test_public_markdown_links_and_removed_api_examples():
 
 
 def test_mkdocs_navigation_targets():
-    source = (ROOT / 'mkdocs.yml').read_text().split('nav:', 1)[1]
+    source = (ROOT / 'mkdocs.yml').read_text(encoding='utf-8').split('nav:', 1)[1]
     for target in re.findall(r':\s+([^\s]+\.md)', source):
         assert (ROOT / 'docs' / target).is_file(), target

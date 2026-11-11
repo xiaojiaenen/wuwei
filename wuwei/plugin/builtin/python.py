@@ -75,13 +75,16 @@ def setup(ctx: PluginContext) -> None:
         if target.suffix != ".py":
             raise ValueError("只允许执行 .py 脚本")
 
-        command = [sys.executable, str(target), *_parse_args(args_json)]
+        # -X utf8：Windows 控制台默认 cp1252，子进程打印非 ASCII 直接崩溃
+        command = [sys.executable, "-X", "utf8", str(target), *_parse_args(args_json)]
         try:
             result = subprocess.run(
                 command,
                 cwd=str(root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:

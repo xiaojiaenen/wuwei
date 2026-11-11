@@ -292,13 +292,15 @@ def setup(ctx: PluginContext) -> None:
         if not isinstance(args, list):
             raise ValueError("args_json 必须是 JSON 数组")
 
-        command = [sys.executable, str(target_path), *[str(item) for item in args]]
+        command = [sys.executable, "-X", "utf8", str(target_path), *[str(item) for item in args]]
         try:
             result = subprocess.run(
                 command,
                 cwd=str(Path(skill.path).resolve()),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=SKILL_SCRIPT_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
