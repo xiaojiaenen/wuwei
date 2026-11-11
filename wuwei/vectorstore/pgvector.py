@@ -2,6 +2,9 @@
 
 通过 asyncpg（lazy import）连接 PostgreSQL，embedding 存 DOUBLE PRECISION[]，
 相似度在 Python 侧按余弦计算。不依赖 pgvector 扩展即可使用。
+
+已知限制：检索为 namespace 全量拉取 + Python 端逐行余弦（未使用向量索引），
+适合小规模实验；生产规模请自建 SQL 向量索引或改用专用后端。
 """
 
 from __future__ import annotations

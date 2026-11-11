@@ -44,6 +44,8 @@ class SimpleEmbedder:
 
     def __init__(self, dim: int = 256):
         self.dim = dim
+        # 注意：内建 hash() 受 PYTHONHASHSEED 随机化，跨进程不可复现；
+        # 持久化向量后重启会导致检索静默失配——仅供测试/进程内使用。
 
     def _text_to_vec(self, text: str) -> list[float]:
         vec = [0.0] * self.dim

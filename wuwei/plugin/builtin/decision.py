@@ -2,6 +2,10 @@
 
 通用的用户决策工具，任何 Agent 都可以使用。
 LLM 调用工具提供问题和选项，用户做决策。
+
+语义边界：本插件只生成 decision_id 并返回待决策提示，框架内没有内置
+消费者轮询该 id——真正的 HITL 自动化审批请使用 ``wuwei.decision`` 的
+``decision_approval_provider``（与 HitlMiddleware 的 approval_provider 对接）。
 """
 
 from __future__ import annotations

@@ -321,6 +321,17 @@ class AsyncSubAgentMiddleware(Middleware):
             return json.dumps({"ok": False, "error": f"Unknown agent: {agent_name}"})
 
         task_id = task_id or f"async_{uuid.uuid4().hex[:12]}"
+        # 有界清理：长生命周期中间件里 _tasks 此前只增不减。终态句柄
+        # （completed/failed/cancelled）超过上限时按创建顺序淘汰；
+        # running 与 interrupted（可恢复）句柄永不清理。
+        if len(self._tasks) >= 64:
+            terminal = [
+                key
+                for key, h in sorted(self._tasks.items(), key=lambda kv: kv[1].created_at)
+                if h.status in ("completed", "failed", "cancelled")
+            ]
+            for key in terminal[: len(self._tasks) - 63]:
+                self._tasks.pop(key, None)
         handle = AsyncTaskHandle(
             task_id=task_id,
             sub_agent_name=agent_name,

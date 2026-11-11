@@ -423,7 +423,9 @@ class LLMGateway:
         - 429 → 指数退避（上限 60s）
         - 5xx / 连接错误 / 超时 → 指数退避
         - 其它 4xx → 不重试
-        重试耗尽后若配置了 fallback 则切换备用 adapter。
+        重试耗尽后若配置了 fallback 则切换备用 adapter。注意：fallback 网关
+        携带自己的完整重试策略，最坏尝试次数 = 主 + 备（共享同一总 deadline，
+        不会无限放大）。
         """
         start = time.monotonic()
         try:
@@ -715,6 +717,9 @@ class LLMGateway:
                         )
                     reason = "tool_calls"
                 yield LLMResponseChunk(
+                    # 透传适配器解析出的内容块（citations/多模态 parts）；
+                    # 未产出的适配器保持空列表，字段不再是死路径。
+                    content_parts=list(data.get("content_parts") or []),
                     content=data.get("content", ""),
                     reasoning_content=data.get("reasoning_content") or None,
                     metadata=dict(provider_metadata),
