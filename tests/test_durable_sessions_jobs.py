@@ -217,13 +217,15 @@ async def test_abandoned_session_lease_does_not_enable_tool_replay(tmp_path):
 async def test_active_session_heartbeat_and_expiration(tmp_path):
     from wuwei.persistence import SQLiteSessionStore
 
-    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=0.3, ttl_seconds=0.2)
+    # TTL 取 2s：commit 与紧随的 load 之间只有 to_thread 调度间隔，
+    # TTL 过小在 CI 负载尖峰下会先于 load 过期（ubuntu 3.13 实测偶发）。
+    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=0.3, ttl_seconds=2.0)
     session = AgentSession("s")
     async with store.checkout(session):
         await asyncio.sleep(0.5)
         session.context.add_user_message("still owned")
     assert (await store.load("s")).context.get_messages()[-1].content == "still owned"
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(2.5)
     assert await store.load("s") is None
 
 
