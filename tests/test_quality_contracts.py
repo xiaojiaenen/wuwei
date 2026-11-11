@@ -20,17 +20,27 @@ def _quote_command(parts: list[str]) -> str:
 
 
 def _pid_alive(pid: int) -> bool:
-    """探测进程是否存活。
+    """探测进程是否（仍能执行代码）存活。
 
-    Windows 上 ``os.kill(pid, 0)`` 语义不同（sig=0 不是探测），用 OpenProcess；
-    POSIX 沿用 kill(pid, 0)。
+    Windows：``os.kill(pid, 0)`` 语义不同（sig=0 不是探测），用 OpenProcess +
+    GetExitCodeProcess（终止后的进程对象在句柄释放前仍可打开）。
+    POSIX：僵尸进程在无回收 init 的容器里会永久保留表项，``kill(pid, 0)`` 仍
+    成功——必须查进程状态，只有非 Z 状态才算存活。
     """
     if os.name != "nt":
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                # stat 形如 "pid (comm) state ..."；comm 可能含空格与括号，
+                # 以最后一个 ")" 之后的首字段为状态。
+                state = f.read().rsplit(b")", 1)[-1].split()[0]
+            return state != b"Z"
+        except (OSError, IndexError):
+            # 无 /proc（如 macOS）：退回 kill(pid, 0) 存在性探测
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
     import ctypes
     import ctypes.wintypes
 
