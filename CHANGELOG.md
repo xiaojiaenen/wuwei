@@ -1,5 +1,17 @@
 # 更新日志
 
+## 3.4.1 — 2026-11-12 · 审计收尾：异步句柄有界清理与流式 content_parts 透传
+
+- `AsyncSubAgentMiddleware._tasks` 有界清理：终态句柄（completed/failed/cancelled）
+  超过 64 个按创建顺序淘汰，修复长生命周期中间件中无限累积；
+  `running` 与 `interrupted`（可恢复）句柄永不清理。
+- gateway 流式 chunk 透传适配器产出的 `content_parts`：citations/多模态 parts
+  到达 runner 的链路激活，字段不再恒为空。
+- 语义边界文档化：decision 插件的 `decision_id` 无内置消费者（HITL 自动化审批
+  请用 `decision_approval_provider`）、fallback 重试次数放大（最坏主+备，共享
+  deadline）、pgvector 后端为全表扫描 + Python 端余弦（生产规模请自建向量索引）、
+  `SimpleEmbedder` 内建 hash 跨进程不可复现（仅供测试/进程内使用）。
+
 # 更新日志
 
 ## 3.4.0 — 2026-11-12 · 审计修复：检查点瘦身、结构化输出收敛与跨平台修复
