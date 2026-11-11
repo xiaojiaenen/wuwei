@@ -774,6 +774,10 @@ class TestCli:
             ],
             capture_output=True,
             text=True,
+            # 子进程 CLI 输出强制 UTF-8（见 wuwei/evals/cli.py），父进程须按
+            # UTF-8 解码——Windows 上 text=True 默认 locale 编码（cp1252）。
+            encoding="utf-8",
+            errors="replace",
             env=env,
             cwd=str(Path(__file__).parent.parent),
             timeout=60,
