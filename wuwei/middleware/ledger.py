@@ -159,7 +159,13 @@ class LedgerMiddleware(Middleware):
         if self.archive_tools is not None and name not in self.archive_tools:
             return tool_message
 
-        content = tool_message.content or ""
+        # 优先使用未截断原文（runner 从执行器侧信道取来临时挂在 metadata 上，
+        # 本钩子负责消费；没有该键时回退到消息内容本身）。
+        full_content = None
+        metadata = getattr(tool_message, "metadata", None)
+        if isinstance(metadata, dict):
+            full_content = metadata.pop("_wuwei_full_content", None)
+        content = full_content or (tool_message.content or "")
         if len(content) <= self.archive_threshold:
             return tool_message
         # 错误结果不归档（模型需要立即看到错误详情）

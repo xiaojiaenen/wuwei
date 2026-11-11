@@ -55,11 +55,14 @@ class ArtifactStore:
             f.flush()
             os.fsync(f.fileno())
         temp.replace(meta)
-        directory = os.open(self.root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if os.name == "posix":
+            # Directory fsync is a POSIX durability idiom; opening a directory
+            # with O_RDONLY raises PermissionError on Windows.
+            directory = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         return ref
 
     def read(self, ref: ArtifactRef | dict, *, owner: str) -> bytes:

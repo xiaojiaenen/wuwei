@@ -1,5 +1,99 @@
 # 更新日志
 
+# 更新日志
+
+## 3.4.0 — 2026-11-12 · 审计修复：检查点瘦身、结构化输出收敛与跨平台修复
+
+依据 2026-11 只读复审（`docs/audits/2026-11-11/`）对低效实现、重复逻辑、过度设计与
+未解决问题的系统性修复。正确性内核（六态结果、unknown 对账、claim 租约、恢复语义）未动。
+
+### 检查点与热路径（P1）
+
+- **检查点 v2 格式**：此前同一份 metadata 在 `state` 列与 `metadata` 列各序列化一次，
+  消息另以 `State.messages` 与 `metadata.session.context` 双份落盘。现在 runner 快照
+  只写一份，`checkpointer.load` 从会话副本重灌 messages，所有消费方（resume、
+  fork、debug.list_steps）零改动；v1 旧检查点与 StateGraph 直存路径行为不变。
+- **保存次数**：`preparing`/`running` 两次 `tool_running` 快照在无治理中间件时合并；
+  同一步内 `tool_result` 与 `step` 快照间无状态变化，合并为一条。
+  实测 40 步工具循环：**201 次保存 / 13.32 MB → 121 次 / 5.18 MB（写出量 -61%）**。
+  进一步压缩需 ActionLog 增量持久化（schema 级改动，本轮为保审计完整性未做）。
+- `usage_records` 保留完整逐条记录：`BudgetMiddleware` 按记录逐条估算成本，
+  截断会破坏预算语义。
+- 工具参数校验收敛：`jsonschema` validator 编译一次、`get_type_hints`/`signature`/
+  `TypeAdapter` 反射缓存一次（此前每次调用重建四份）。
+- 流式热路径：移除逐 delta 无消费者的 `provider_delta` 全量序列化（runner 侧同名键
+  覆盖只保留最后一个）；工具参数分片改列表一次性 `join`（大参数 O(n²) → O(n)）；
+  流式终止 JSON 解析错误统一为 `Malformed tool arguments`（与适配器契约一致）；
+  Anthropic 适配器的 SDK 能力反射探测缓存为一次。
+
+### 结构化输出（P0）
+
+- `auto` 降级链从 native→prompted 扩展为 **native→tool→prompted**：兼容端点
+  （自定义 base_url）不再默认落到最不可靠的提示词模式；带可执行工具的请求保持
+  prompted（结构化输出工具必须独占 tool_choice）。
+- prompted 注入与 runner 恢复路径共用唯一实现 `llm/output.py:inject_prompted_schema`：
+  并入首条 system 而不是追加到消息尾部（尾部 system 是严格端点 400 的根因，
+  3.3.3 只修了 runner 一侧）。两条路径注入文案一致且幂等。
+- 新增 `tests/test_structured_output_matrix.py`（provider×mode 矩阵）。
+
+### 跨平台与缺陷修复（P0）
+
+- 修复 `ArtifactStore.put` 在 Windows 必抛 `PermissionError`（目录 fsync 是 POSIX
+  惯用法），且失败发生在 blob/meta 写盘之后、留下孤儿文件——8 个测试转绿。
+- 修复 SQLite 连接从不关闭（`with sqlite3.connect` 只提交不关闭）：Windows 文件锁
+  导致临时目录清理失败、生产环境句柄泄漏。涉及 graph/checkpoint、persistence/sessions、
+  persistence/jobs。
+- 修复 Windows 进程树终止：shell 启动的命令是孙进程，只 kill 直接子进程不传播，
+  超时/取消后 descendant 存活；改用 `taskkill /F /T`（POSIX 沿用进程组）。
+- `tests/test_quality_contracts.py`、`test_sandbox.py`、租约测试跨平台化
+  （`os.kill(pid,0)` 语义、POSIX 引号、`ps`/`pwd` 依赖、时间余量）。
+
+### 委派与治理（P2）
+
+- 新增 `wuwei/agent/child.py:build_child_agent` 作为受治理子代理的单一构建点，
+  收敛 4 处各自为政的 `Agent(...)` 构造（sub_agent / multi_agent / PlanExecutor /
+  内置规划）。计划任务此前丢失 event_bus 透传，现已统一接入。
+- 修复 `SubAgent.to_tool_schema` 对模型撒谎：声明 `input_model` 时 schema 仍广播
+  "自然语言 task"，实际要求 JSON 序列化串——模型 schema 现已写进参数描述。
+- `inherit_middleware` 迁至 `child.py`，`sub_agent` 保留再导出。
+- multi_agent 文档订正：图编排本身无恢复入口，成员会话可单独恢复。
+
+### 缺陷与契约（N）
+
+- `LLMError.details["provider"]` 恒为类名 "LLMGateway"，现反映真实供应商。
+- http 插件不再把异常吞成 `"请求失败: ..."` 成功文本（违反框架自身 `ok:false`
+  错误契约）；连接失败直接抛出由执行器包装为结构化错误；截断标注原文长度。
+- skill 指引按 session 注入（此前按中间件实例一次性，跨会话静默丢失），并改为
+  并入首条 system 而非再插一条。
+- `handle_task_tool` 的 ToolMessage call_id 不再拿工具名充数。
+
+### 死代码与文档（P3）
+
+- 删除零引用实现：`memory/context_compressor.py`、`memory/context_window.py`、
+  `Context.keep_last_turns`、`session.summary` 僵尸字段、`multi_agent.HandoffSignal`、
+  `Swarm` 别名、`TeamMember.tools`（写入后无读者）、`create_planner`、
+  `gateway._create_fallback_adapter`、sub_agent `before_llm` 死写、
+  `run_plan` 不可达分支。
+- `_extract_json` 迁至 `runtime/agent_runner.py`（消除 runtime→agent 反向导入），
+  `agent.py` 保留再导出。
+- 文档订正：tiktoken 注释与实现不符、decision 端点文档与代码不一致
+  （统一 `{base_url}/systemone`）、compression 文档夸大接入状态、
+  README 将 sandbox（Docker/E2B）标注为实验性未接入模块。
+
+### 测试与 CI
+
+- `tests/test_coverage_gaps.py` 从模块级脚本（10 个无断言 `test_` 函数在 CI 恒通过、
+  Windows 上 import 即 `sys.exit(1)` 炸掉收集）改写为 22 条真断言用例。
+- 新增 `tests/test_audit_regressions.py`（12 条）：检查点 v2/v1 兼容、Ledger 全量保真、
+  schema 契约、委派工厂语义、http 错误契约、skill per-session 注入、provider 字段。
+- `docs/audits/2026-11-11/reproduce_efficiency_gaps.py` 断言化：40 步 ≤130 次保存 /
+  ≤6 MB、归档 == 原文、prompted 角色断言，作为改造门禁可重复执行。
+- CI 增加 **windows-latest** 矩阵（py3.12）：Windows 专属缺陷（目录 fsync、进程树
+  终止、SQLite 锁、路径语义）此前从未被 ubuntu-only CI 捕获；发布链（DBOS/docs/build）
+  仍由 ubuntu 承载。
+- 本地基线：16 failed（Windows）→ **0 failed**；全量 598 passed / 12 skipped。
+
+
 ## 3.3.3 — 2026-11-10 · 结构化输出与 system 消息
 
 - 修复结构化输出（`response_model` / `output_spec` 的 JSON 提示路径）把 schema 说明

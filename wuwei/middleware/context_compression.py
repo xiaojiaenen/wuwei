@@ -91,9 +91,9 @@ class ContextCompressionMiddleware(Middleware):
         return owner.setdefault(key, {})
 
     def _estimate_tokens(self, messages: list) -> int:
-        """估算消息列表的 token 数
+        """估算消息列表的 token 数（CJK×1.5 + 其他×0.3 的字符启发式）。
 
-        优先使用 tiktoken，降级为 Unicode 字符估算。
+        无 tiktoken 依赖；接入真实 provider 后可用响应 usage 校准。
         """
         cjk_count = 0
         non_cjk_count = 0

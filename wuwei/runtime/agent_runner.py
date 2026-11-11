@@ -16,6 +16,10 @@ from wuwei.agent.session import AgentSession
 from wuwei.core.message import AIMessage, ToolMessage
 from wuwei.graph.state import State
 from wuwei.llm import AgentEvent, AgentRunResult, LLMResponse, Message, ToolCall
+from wuwei.llm.output import (
+    STRUCTURED_SCHEMA_MARKER as _STRUCTURED_SCHEMA_MARKER,
+)
+from wuwei.llm.output import inject_prompted_schema
 from wuwei.middleware.base import MiddlewareContext
 from wuwei.middleware.stack import MiddlewareStack
 from wuwei.runtime.action_log import get_or_create_log
@@ -36,35 +40,54 @@ def _merge_usage(total, usage):
         total[key] = total.get(key, 0) + (value or 0)
 
 
-STRUCTURED_SCHEMA_MARKER = "只输出符合以下JSON Schema的JSON对象："
+STRUCTURED_SCHEMA_MARKER = _STRUCTURED_SCHEMA_MARKER
 
 
 def _attach_structured_schema(messages, schema) -> None:
-    """把结构化输出约束并入首条 system 消息。
+    """向后兼容别名：唯一实现在 ``wuwei.llm.output.inject_prompted_schema``。"""
+    inject_prompted_schema(messages, schema)
 
-    不能 ``insert(0, SystemMessage(...))``：会话第 0 条已经是 system prompt，
-    再插一条就形成相邻两条 system，OpenAI 兼容端点（DeepSeek / vLLM / 各类
-    网关）会直接 400 ``System message must be at the beginning``。
 
-    合并而非新增还有两个好处：system 条数与顺序不变，prompt caching 的前缀
-    保持稳定；注入的说明不会随轮次累加。重复调用是幂等的。
-    """
-    from wuwei.core.message import SystemMessage
-
-    text = STRUCTURED_SCHEMA_MARKER + json.dumps(schema, ensure_ascii=False)
-    if not messages:
-        messages.append(SystemMessage(content=text))
-        return
-    head = messages[0]
-    if head.role != "system":
-        # 没有可合并的 system（调用方自建上下文）时才新增，且必须放在首位。
-        messages.insert(0, SystemMessage(content=text))
-        return
-    if STRUCTURED_SCHEMA_MARKER in (head.content or ""):
-        return
-    head.content = f"{head.content}\n\n{text}" if head.content else text
-    # 首条 system 若带多模态块，字符串追加到 content 后 provider 会把它当文本块发，
-    # 这里无需重排 content_parts。
+def _extract_json(text: str):
+    """从 LLM 输出中提取 JSON 对象（容忍 markdown 代码块与前后缀文本）。"""
+    text = text.strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 括号匹配提取第一个完整 JSON 对象
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
 
 
 class AgentRunner:
@@ -398,7 +421,10 @@ class AgentRunner:
                 for k, v in ancestor.metadata.items()
                 if k not in ("background_tasks", "ancestor_state")
             }
-        state = State(messages=self._copy_messages(), metadata=metadata, step=meta["step_index"])
+        # v2 快照：消息唯一副本在 metadata.session.context，State.messages 不再
+        # 携带第二份深拷贝；checkpointer.load 会从会话副本重灌，消费方零改动。
+        state = State(messages=[], metadata={}, step=meta["step_index"])
+        self._last_save = (kind, meta["step_index"])
         return await self.checkpointer.save(state, metadata=metadata)
 
     def _charge_usage(self, usage, latency_ms, model, available=True):
@@ -655,7 +681,6 @@ class AgentRunner:
                     if not pending:
                         if meta.get("structured_schema"):
                             from jsonschema import validate
-                            from wuwei.agent.agent import _extract_json
                             from wuwei.core.errors import LLMError
 
                             try:
@@ -720,7 +745,11 @@ class AgentRunner:
                     break
                 pending = []
                 meta["step_index"] += 1
-                await self._save_checkpoint(kind="step")
+                # 同一步内 tool_result 快照与 step 快照之间没有任何状态变化，
+                # 相邻两条全量快照合并为一条（step 快照仅在没有工具提交时充当
+                # LLM 阶段的恢复锚点）。
+                if getattr(self, "_last_save", None) != ("tool_result", meta["step_index"] - 1):
+                    await self._save_checkpoint(kind="step")
             else:
                 status = "incomplete"
                 termination_reason = "max_steps"
@@ -888,7 +917,11 @@ class AgentRunner:
                 yield self._tool_end_event(tc, final)
                 continue
             self._metadata["tool_states"][tc.id] = "preparing"
-            await self._save_checkpoint(kind="tool_running", pending=remaining)
+            if self.middleware._before_tool_mws:
+                # 有 before_tool 中间件（审批/权限）时保留 preparing 崩溃区分点：
+                # 此处尚未派发，恢复时可安全重放。无治理中间件时该窗口内不存在
+                # 可区分状态，两次全量快照合并为派发前的一次。
+                await self._save_checkpoint(kind="tool_running", pending=remaining)
             if self._guard_dispatches_tools():
                 # A tool-handler middleware runs the tool inside before_tool, so the
                 # call is in flight from here on; without one it is not dispatched yet.
@@ -989,7 +1022,18 @@ class AgentRunner:
 
     async def _commit_tool(self, ctx, tc, msg, remaining):
         final = self._to_core_tool_message(msg, tc)
+        # 归档型中间件（Ledger）需要未截断原文：从执行器侧信道取来，临时挂在
+        # metadata 上供 after_tool 钩子读取，钩子跑完立即移除——原文不进上下文、
+        # 不进检查点，只有账本归档里留有全量。
+        full_output = None
+        drain = getattr(self.tool_executor, "drain_full_output", None)
+        if drain is not None:
+            full_output = drain(tc.id)
+        if full_output and full_output != (final.content or ""):
+            final.metadata["_wuwei_full_content"] = full_output
         final = await self._in_context(ctx, self.middleware.execute_after_tool, ctx, final)
+        if isinstance(final.metadata, dict):
+            final.metadata.pop("_wuwei_full_content", None)
         final = self._to_core_tool_message(final, tc)
         final.metadata.setdefault("tool_outcome", {"status": final.status, "executed": False})
         self.session.context.get_messages().append(final)

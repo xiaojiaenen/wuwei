@@ -93,7 +93,3 @@ class Planner:
             task.llm_calls = 0
         return tasks
 
-    @classmethod
-    def create_planner(cls, llm: LLMGateway) -> "Planner":
-        """基于给定 llm 创建默认 planner。"""
-        return cls(llm)

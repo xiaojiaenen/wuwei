@@ -17,48 +17,8 @@ from wuwei.tools import Tool, ToolRegistry
 ToolLike = Tool | Callable[..., Any] | Callable[..., Awaitable[Any]]
 
 
-def _extract_json(text: str):
-    """从 LLM 输出中提取 JSON 对象（容忍 markdown 代码块与前后缀文本）。"""
-    import json as _json
-
-    text = text.strip()
-    if "```json" in text:
-        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in text:
-        text = text.split("```", 1)[1].split("```", 1)[0].strip()
-    try:
-        return _json.loads(text)
-    except _json.JSONDecodeError:
-        pass
-    # 括号匹配提取第一个完整 JSON 对象
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return _json.loads(text[start : i + 1])
-                except _json.JSONDecodeError:
-                    return None
-    return None
+# _extract_json 唯一实现已迁至 wuwei.runtime.agent_runner（消除 runtime→agent 反向导入）
+from wuwei.runtime.agent_runner import _extract_json as _extract_json  # noqa: E402
 
 
 class Agent(BaseSessionAgent):
@@ -339,13 +299,14 @@ class Agent(BaseSessionAgent):
                 current.context.add_user_message(goal)
                 if planner is None or isinstance(planner, Planner):
                     p = planner or Planner(self.llm)
-                    planning_agent = Agent(
-                        llm=p.llm,
-                        load_builtins=False,
-                        middleware=self.middleware,
+                    from wuwei.agent.child import build_child_agent
+
+                    planning_agent = build_child_agent(
+                        p.llm,
+                        system_prompt=current.system_prompt,
+                        child_middleware=self.middleware,
                         checkpointer=self.checkpointer,
                         event_bus=self.event_bus,
-                        default_system_prompt=current.system_prompt,
                     )
                     planning_session = planning_agent.create_session()
                     planning_session.context.replace_messages(

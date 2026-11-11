@@ -207,9 +207,11 @@ class OpenAIAdapter(BaseAdapter):
             return {"usage": usage} if getattr(chunk, "usage", None) is not None else None
 
         delta = chunk.choices[0].delta
+        # 不逐 delta 全量 provider_dump：该键此前没有任何消费者，而 runner 侧
+        # 同名键覆盖只保留最后一个，逐 token 的序列化全部被丢弃。需要原始
+        # delta 的下游应使用 SDK 客户端的 raw_response 流。
         result: dict[str, Any] = {
             "provider_metadata": {
-                "provider_delta": provider_dump(delta),
                 "refusal_delta": getattr(delta, "refusal", None),
             },
             "content": delta.content or "",

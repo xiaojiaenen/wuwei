@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import time
-from contextlib import suppress
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
@@ -62,7 +62,7 @@ class SQLiteJobStore:
             raise ValueError("namespace/lease must be nonempty/positive")
         self.path, self.namespace, self.lease_seconds = str(path), namespace, lease_seconds
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 namespace TEXT NOT NULL, id TEXT NOT NULL, key TEXT NOT NULL,
                 payload TEXT NOT NULL, token TEXT, lease_until REAL,
@@ -104,7 +104,7 @@ class SQLiteJobStore:
             raise ValueError("Idempotency key must be a string")
 
         def create():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute(
                     "SELECT payload FROM jobs WHERE namespace=? AND key=?", (self.namespace, key)
@@ -129,7 +129,7 @@ class SQLiteJobStore:
 
     async def get(self, job_id):
         def read():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 try:
                     return self._read(db, job_id)[0]
@@ -140,7 +140,7 @@ class SQLiteJobStore:
 
     async def claim(self, job_id, *, reconciliation=False):
         def claim():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, _ = self._read(db, job_id)
                 expected = "unknown" if reconciliation else "queued"
@@ -155,7 +155,7 @@ class SQLiteJobStore:
 
     async def heartbeat(self, job_id, token):
         def renew():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, current_token = self._read(db, job_id)
                 if current_token != token or record.status != "running":
@@ -167,7 +167,7 @@ class SQLiteJobStore:
 
     async def finish(self, job_id, token, result):
         def finish():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, current_token = self._read(db, job_id)
                 if current_token != token or record.status != "running":
@@ -184,7 +184,7 @@ class SQLiteJobStore:
 
     async def annotate(self, job_id, entry):
         def append():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, token = self._read(db, job_id)
                 if token is not None:
@@ -197,7 +197,7 @@ class SQLiteJobStore:
 
     async def cancel(self, job_id):
         def cancel():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, token = self._read(db, job_id)
                 if record.status in ("completed", "incomplete", "error", "cancelled", "unknown"):
@@ -220,7 +220,7 @@ class SQLiteJobStore:
         )
 
         def signal():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record, _ = self._read(db, job_id)
                 old = db.execute(

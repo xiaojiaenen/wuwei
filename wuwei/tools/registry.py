@@ -26,7 +26,7 @@ class ToolRegistry:
     def list_tools(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def to_schema(self) -> list[Tool]:
+    def to_schema(self) -> list[dict]:
         return [tool.to_schema() for tool in self._tools.values()]
 
     def register_callable(

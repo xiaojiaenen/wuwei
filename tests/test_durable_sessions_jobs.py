@@ -196,11 +196,15 @@ async def test_abandoned_session_lease_does_not_enable_tool_replay(tmp_path):
     import time
     from wuwei.persistence import SQLiteSessionStore
 
-    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=0.02, ttl_seconds=0.02)
+    # 租约余量必须大于线程调度 + SQLite 打开的延迟（Windows 上 to_thread
+    # 首次调度可达数十毫秒），否则心跳续期会晚于过期。
+    # 租约余量按"重负载下 to_thread + SQLite 打开可达数百毫秒"取值，
+    # 避免恢复 checkout 自身的 commit 因调度延迟超过租约而误报。
+    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=1.0, ttl_seconds=0.4)
     # Equivalent persisted state to a process killed after claiming a session.
     original = AgentSession("s")
     _, revision = store._acquire(original, "dead-worker")
-    await asyncio.sleep(0.04)
+    await asyncio.sleep(1.15)
     recovered = AgentSession("s")
     async with store.checkout(recovered):
         assert recovered.metadata["_blocked_run"]["reason"] == "session_lease_expired"
@@ -213,13 +217,13 @@ async def test_abandoned_session_lease_does_not_enable_tool_replay(tmp_path):
 async def test_active_session_heartbeat_and_expiration(tmp_path):
     from wuwei.persistence import SQLiteSessionStore
 
-    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=0.06, ttl_seconds=0.03)
+    store = SQLiteSessionStore(tmp_path / "s.db", lease_seconds=0.3, ttl_seconds=0.2)
     session = AgentSession("s")
     async with store.checkout(session):
-        await asyncio.sleep(0.13)
+        await asyncio.sleep(0.5)
         session.context.add_user_message("still owned")
     assert (await store.load("s")).context.get_messages()[-1].content == "still owned"
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)
     assert await store.load("s") is None
 
 

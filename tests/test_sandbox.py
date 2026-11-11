@@ -11,6 +11,7 @@
 - get_sandbox 工厂
 """
 
+import os
 import shutil
 import sys
 from importlib.util import find_spec
@@ -98,8 +99,14 @@ class TestLocalSandboxCompat:
 
     async def test_cwd_workspace(self, tmp_path):
         s = LocalSandbox(workspace=str(tmp_path))
-        result = await s.execute("pwd")
-        assert result.stdout.strip() == str(tmp_path)
+        # 不用 pwd：其输出格式取决于 PATH 中解析到哪个实现（Git 的 pwd.exe
+        # 会输出 MSYS 风格路径）。用 Python 自己的 getcwd 做跨平台探测。
+        result = await s.execute(f'"{sys.executable}" -c "import os; print(os.getcwd())"')
+        assert result.success, result.error
+        assert (
+                os.path.realpath(result.stdout.strip())
+                == os.path.realpath(str(tmp_path))
+        )
 
     async def test_context_manager(self):
         async with LocalSandbox() as s:

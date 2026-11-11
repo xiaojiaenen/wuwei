@@ -43,7 +43,6 @@ class FileStorage:
             "system_prompt": session.system_prompt,
             "max_steps": session.max_steps,
             "parallel_tool_calls": session.parallel_tool_calls,
-            "summary": session.summary,
             "metadata": session.metadata,
             "last_usage": session.last_usage,
             "last_latency_ms": session.last_latency_ms,

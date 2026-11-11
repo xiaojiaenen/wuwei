@@ -733,44 +733,6 @@ def test_state_serialization():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Test 14: Context Window（上下文窗口管理）
-# ═══════════════════════════════════════════════════════════════════
-
-
-def test_context_window():
-    """测试 SimpleContextWindow"""
-    from wuwei.memory.context_window import SimpleContextWindow, split_turns, ContextWindowConfig
-    from wuwei.llm.types import Message
-
-    # 构建多轮对话
-    messages = [
-        Message(role="system", content="You are helpful"),
-        Message(role="user", content="Q1"),
-        Message(role="assistant", content="A1", tool_calls=[]),
-        Message(role="user", content="Q2"),
-        Message(role="assistant", content="A2", tool_calls=[]),
-        Message(role="user", content="Q3"),
-        Message(role="assistant", content="A3", tool_calls=[]),
-    ]
-
-    # split_turns
-    turns = split_turns(messages)
-    assert len(turns) >= 2  # at least 2 turns
-
-    # SimpleContextWindow
-    window = SimpleContextWindow(ContextWindowConfig(max_recent_turns=2, max_tool_chars=1000))
-    # build_messages needs a session-like object
-    class FakeSession:
-        summary = None
-    trimmed = window.build_messages(FakeSession(), messages)
-    assert len(trimmed) <= len(messages)
-    # 至少保留系统消息 + 最近 2 轮
-    assert len(trimmed) >= 3  # system + user + assistant (最近一轮)
-
-    print("  ✅ ContextWindow: split_turns + SimpleContextWindow 通过")
-
-
-# ═══════════════════════════════════════════════════════════════════
 # Test 15: ContextCompressionMiddleware（上下文压缩）
 # ═══════════════════════════════════════════════════════════════════
 
@@ -974,10 +936,8 @@ def test_swarm():
         name="researcher",
         agent=None,
         role="Research specialist",
-        tools=["search", "fetch"],
     )
     assert tm.name == "researcher"
-    assert len(tm.tools) == 2
 
     # MultiAgentGraph
     graph = MultiAgentGraph()
@@ -1120,7 +1080,6 @@ async def main():
         ("Skill System", test_skill_system),
         ("Runnable Chain", test_runnable),
         ("State Serialization", test_state_serialization),
-        ("Context Window", test_context_window),
         ("Context Compression MW", test_context_compression_middleware),
         ("Builtin Tools", test_builtin_tools),
         ("Config", test_config),

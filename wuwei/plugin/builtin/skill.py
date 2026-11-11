@@ -82,12 +82,16 @@ class SkillPromptMiddleware(Middleware):
 
     def __init__(self, skill_manager):
         self.skill_manager = skill_manager
-        self._injected = False
+        # 同一 Agent（中间件实例）可能跨多个 session 复用：技能指引按 session
+        # 注入一次，而不是按实例只注入一次（否则后续会话静默丢失技能指引）。
+        self._injected_sessions: set = set()
         self.active_allowed_tools: list[str] | None = None
 
     async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
         """LLM 调用前注入技能指引"""
-        if self._injected:
+        session = ctx.config.get("session")
+        session_id = getattr(session, "session_id", None)
+        if session_id is not None and session_id in self._injected_sessions:
             return ctx
 
         skills = self.skill_manager.list_skills()
@@ -101,12 +105,16 @@ class SkillPromptMiddleware(Middleware):
         skill_text = "\n".join(skill_lines)
         system_prompt = SKILL_INSTRUCTION.format(skill_text=skill_text)
 
-        ctx.state.messages.insert(
-            0,
-            SystemMessage(content=system_prompt),
-        )
+        # 并入首条 system（保持 system 唯一性与 prompt caching 前缀稳定），
+        # 而不是在头部再插一条 system 形成相邻两条。
+        head = ctx.state.messages[0] if ctx.state.messages else None
+        if head is not None and getattr(head, "role", "") == "system":
+            head.content = f"{head.content}\n\n{system_prompt}" if head.content else system_prompt
+        else:
+            ctx.state.messages.insert(0, SystemMessage(content=system_prompt))
 
-        self._injected = True
+        if session_id is not None:
+            self._injected_sessions.add(session_id)
         return ctx
 
     async def before_tool(self, ctx: MiddlewareContext, tool_call):

@@ -8,33 +8,47 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
+        # ubuntu 承载完整发布链（DBOS/docs/build）；windows 守护平台特有回归
+        #（目录 fsync、进程树终止、SQLite 文件锁、路径语义）——2026-11 审计
+        # 发现 8 类 Windows 专属缺陷从未被 ubuntu-only CI 捕获。
+        os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12', '3.13']
+        exclude:
+          - os: windows-latest
+            python-version: '3.11'
+          - os: windows-latest
+            python-version: '3.13'
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache-dependency-glob: pyproject.toml
-      - name: Install
+      - name: Install (POSIX)
+        if: runner.os != 'Windows'
         run: |
           uv pip install --python .venv/bin/python -e '.[dev,anthropic,mcp]'
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv pip install --python .venv/Scripts/python.exe -e '.[dev,anthropic,mcp]'
       - name: Fatal lint checks
-        run: .venv/bin/ruff check wuwei/ --select E9,F63,F7,F82
+        run: uv run --no-sync ruff check wuwei/ --select E9,F63,F7,F82
       - name: Test (offline; live provider calls require explicit --live)
-        run: .venv/bin/python -m pytest tests/ -q
+        run: uv run --no-sync python -m pytest tests/ -q
       - name: DBOS durable queue (local SQLite, offline model)
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && runner.os == 'Linux'
         run: |
           uv pip install --python .venv/bin/python -e '.[dbos]'
           .venv/bin/python -m pytest tests/test_dbos_jobs.py -q
       - name: Documentation
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && runner.os == 'Linux'
         run: |
           uv pip install --python .venv/bin/python -e '.[docs]'
           .venv/bin/python -m mkdocs build --strict
       - name: Distribution
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && runner.os == 'Linux'
         run: uv build

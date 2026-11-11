@@ -328,15 +328,14 @@ class LLMGateway:
         spec = (
             OutputSpec.model_validate(output_spec) if isinstance(output_spec, dict) else output_spec
         )
-        mode = spec.resolve(self.model_profile) if spec else None
+        mode = spec.resolve(self.model_profile, has_tools=bool(tools)) if spec else None
         protocol = getattr(self.adapter, "provider_name", self.provider)
         if mode == "prompted":
-            from ..core.message import SystemMessage
+            # 与 runner 恢复路径共用同一实现：并入首条 system，而不是追加到
+            # 尾部（尾部 system 会被 DeepSeek/vLLM 等严格端点 400）。
+            from .output import inject_prompted_schema
 
-            messages = [
-                *messages,
-                SystemMessage("Return JSON matching this schema: " + json.dumps(spec.schema_)),
-            ]
+            inject_prompted_schema(messages, spec.schema_)
         if mode == "tool":
             from .output import strict_json_schema
 
@@ -441,9 +440,9 @@ class LLMGateway:
                             messages, tools, **kwargs
                         )
                 except Exception as fallback_exc:
-                    self._raise_translated(fallback_exc)
+                    self._raise_translated(fallback_exc, self.provider)
             else:
-                self._raise_translated(exc)
+                self._raise_translated(exc, self.provider)
         response.latency_ms = int((time.monotonic() - start) * 1000)
         return response
 
@@ -482,7 +481,7 @@ class LLMGateway:
     _PASSTHROUGH_ERRORS = (LLMError, ValueError, TypeError, KeyError, TimeoutError)
 
     @classmethod
-    def _as_llm_error(cls, exc: Exception) -> LLMError:
+    def _as_llm_error(cls, exc: Exception, provider: str | None = None) -> LLMError:
         """Translate a provider/SDK failure into one type callers can classify."""
         category = cls._classify_error(exc)
         status = getattr(exc, "status_code", None)
@@ -493,7 +492,8 @@ class LLMGateway:
             "category": category,
             "status_code": status,
             "error_type": type(exc).__name__,
-            "provider": cls.__name__,
+            # 修复：此前恒为类名 "LLMGateway"，排障时无法定位实际供应商
+            "provider": provider or "unknown",
         }
         translated.category = category
         translated.status_code = status
@@ -506,10 +506,10 @@ class LLMGateway:
         return translated
 
     @classmethod
-    def _raise_translated(cls, exc: Exception) -> NoReturn:
+    def _raise_translated(cls, exc: Exception, provider: str | None = None) -> NoReturn:
         if isinstance(exc, cls._PASSTHROUGH_ERRORS):
             raise exc
-        raise cls._as_llm_error(exc) from exc
+        raise cls._as_llm_error(exc, provider) from exc
 
     async def _backoff(self, exc, attempt):
         headers = getattr(getattr(exc, "response", None), "headers", {})
@@ -548,9 +548,6 @@ class LLMGateway:
                     raise
                 await self._backoff(exc, attempt)
 
-    def _create_fallback_adapter(self, config):
-        return LLMGateway(config).adapter
-
     def set_fallback(self, fallback_gateway):
         """Borrow the complete fallback policy; its caller retains lifecycle ownership."""
         self._fallback_gateway = fallback_gateway
@@ -576,7 +573,7 @@ class LLMGateway:
             async for chunk in self._generate_stream_attempts(messages, tools, **kwargs):
                 yield chunk
         except Exception as exc:
-            self._raise_translated(exc)
+            self._raise_translated(exc, self.provider)
 
     async def _generate_stream_attempts(self, messages, tools, **kwargs):
         observed = False
@@ -648,12 +645,15 @@ class LLMGateway:
                 if deltas:
                     for delta in deltas:
                         item = pending.setdefault(
-                            delta["index"], {"id": "", "name": "", "arguments": ""}
+                            delta["index"], {"id": "", "name": "", "arg_parts": []}
                         )
                         for key in ("id", "name"):
                             if delta.get(key):
                                 item[key] = delta[key]
-                        item["arguments"] += delta.get("arguments", "")
+                        # 分片追加到列表，完成时一次性 join：字符串 += 在数百 KB
+                        # 参数按 4KB 分片时是 O(n²) 拷贝。
+                        if delta.get("arguments"):
+                            item["arg_parts"].append(delta["arguments"])
                 event_metadata = data.get("provider_metadata", {})
                 refusal_delta = event_metadata.get("refusal_delta")
                 if refusal_delta:
@@ -698,7 +698,13 @@ class LLMGateway:
                         if not item["id"] or not item["name"]:
                             raise ValueError("Incomplete tool call identity")
                         # Never replace corrupt or truncated JSON with executable empty arguments.
-                        arguments = json.loads(item["arguments"])
+                        arguments_text = "".join(item.get("arg_parts") or [])
+                        try:
+                            arguments = json.loads(arguments_text)
+                        except json.JSONDecodeError as exc:
+                            # 与各适配器的 "Malformed tool arguments" 契约保持一致，
+                            # 不让裸 JSONDecodeError 逸出。
+                            raise ValueError("Malformed tool arguments") from exc
                         if not isinstance(arguments, dict):
                             raise ValueError("Tool arguments must be a JSON object")
                         complete.append(

@@ -10,7 +10,7 @@ import asyncio
 import json
 import sqlite3
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import closing, asynccontextmanager, suppress
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -44,7 +44,7 @@ class SQLiteSessionStore:
         self.path, self.namespace = str(path), namespace
         self.ttl_seconds, self.lease_seconds = ttl_seconds, lease_seconds
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute("""CREATE TABLE IF NOT EXISTS sessions (
                 namespace TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 0, expires REAL, token TEXT, lease_until REAL,
@@ -60,7 +60,7 @@ class SQLiteSessionStore:
 
     async def load(self, session_id):
         def read():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 row = db.execute(
                     "SELECT payload,expires FROM sessions WHERE namespace=? AND id=?",
                     (self.namespace, session_id),
@@ -73,7 +73,7 @@ class SQLiteSessionStore:
 
     async def delete(self, session_id):
         def delete():
-            with self._connect() as db:
+            with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute(
                     "SELECT lease_until,payload FROM sessions WHERE namespace=? AND id=?",
@@ -101,7 +101,7 @@ class SQLiteSessionStore:
     def _acquire(self, session, token):
         payload = json.dumps(session.to_dict(), ensure_ascii=False)
         now = time.time()
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT payload,revision,expires,lease_until FROM sessions "
@@ -139,7 +139,7 @@ class SQLiteSessionStore:
 
     def _renew(self, session_id, token):
         now = time.time()
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "UPDATE sessions SET lease_until=? WHERE namespace=? AND id=? "
                 "AND token=? AND lease_until>?",
@@ -150,7 +150,7 @@ class SQLiteSessionStore:
 
     def _commit(self, session, token, revision):
         payload, now = json.dumps(session.to_dict(), ensure_ascii=False), time.time()
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             cursor = db.execute(
                 "UPDATE sessions SET payload=?,revision=revision+1,expires=?, "
                 "token=NULL,lease_until=NULL WHERE namespace=? AND id=? "
@@ -179,7 +179,6 @@ class SQLiteSessionStore:
             "system_prompt",
             "max_steps",
             "parallel_tool_calls",
-            "summary",
             "last_usage",
             "last_latency_ms",
             "last_llm_calls",

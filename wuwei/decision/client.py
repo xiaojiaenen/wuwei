@@ -7,7 +7,8 @@
 三种后端通过 base_url 切换（协议同构）：
 - TypeSafe 云:      https://api.typesafe.ai/v1        (POST /v1/systemone)
 - OpenRouter 托管:  https://openrouter.ai/api/v1      (POST /api/v1/systemone)
-- Intern-Decision:  http://localhost:8000             (POST /v1/decisions，开源多模态判定模型)
+- Intern-Decision:  http://localhost:8000             (POST /systemone，开源多模态判定模型；
+                    三种后端协议同构，代码统一请求 {base_url}/systemone)
 
 在 agent 框架中的典型用法（不要用它做主循环模型——它只会输出判定）：
 1. HITL 自动审批：decision_approval_provider(client) 作为 HitlMiddleware 的

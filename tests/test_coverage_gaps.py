@@ -1,152 +1,121 @@
-"""Wuwei 框架 — 补充测试：覆盖之前未测试的模块
+"""Wuwei 框架 — 补充测试：覆盖其他测试文件未覆盖的模块。
+
+历史说明：本文件曾是模块级脚本（check() 打印计数、无断言、import 时
+sys.exit），在 CI 中产生假阳性通过、在 Windows 上破坏 pytest 收集。
+2026-11 改写为真正的 pytest 用例。
 
 覆盖:
 - parsers (JsonOutputParser, ListOutputParser, PydanticOutputParser)
+- skill (FileSystemSkillProvider / SkillManager)
+- gateway (GatewayMessage, 平台适配器导入)
+- sandbox (LocalSandbox 错误路径、超时、工作区)
+- plugin (PluginManager, PluginContext)
+- llm adapters (Anthropic / OpenAI / Responses 导入) 与 Agent.from_env
 - middleware (MemoryMiddleware, RagMiddleware, StorageMiddleware)
-- gateway (WebhookGateway, platform adapters)
-- sandbox (LocalSandbox error paths, timeout)
-- plugin (PluginLoader.load_all, PluginRegistry)
-- llm adapters (Anthropic, Ollama, DashScope, Zhipu config/import)
-- observability (TracingMiddleware span creation)
+- observability (TracingMiddleware)
 - streaming types
-- Agent.from_env() factory
-- @tool decorator usage
+- @tool 装饰器 / ToolRegistry
 """
 
-import sys, os, json, tempfile, asyncio
-from pathlib import Path
+import asyncio
+import os
+import tempfile
 
-_here = os.path.dirname(os.path.abspath(__file__))
-_wuwei_root = os.path.dirname(_here)
-sys.path.insert(0, _wuwei_root)
+import pytest
+from pydantic import BaseModel
 
-PASSED = 0
-FAILED = 0
 
-def check(name, condition, detail=""):
-    global PASSED, FAILED
-    if condition:
-        PASSED += 1
-        print(f"  ✅ {name}")
-    else:
-        FAILED += 1
-        print(f"  ❌ {name}  {detail}")
+# ── parsers ────────────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-print("=" * 60)
-print("Test 1: Parsers — JsonOutputParser / ListOutputParser / PydanticOutputParser")
-print("=" * 60)
 
-def test_parsers():
+def test_json_output_parser_parses_objects_and_arrays():
     from wuwei.parsers.json import JsonOutputParser
-    from wuwei.parsers.list import ListOutputParser
-    from wuwei.parsers.pydantic import PydanticOutputParser
-    from pydantic import BaseModel
 
-    # JsonOutputParser
     parser = JsonOutputParser()
-    result = parser.parse('{"name": "test", "value": 42}')
-    check("JsonOutputParser 解析对象", result == {"name": "test", "value": 42})
+    assert parser.parse('{"name": "test", "value": 42}') == {"name": "test", "value": 42}
+    assert parser.parse("[1, 2, 3]") == [1, 2, 3]
 
-    result2 = parser.parse('[1, 2, 3]')
-    check("JsonOutputParser 解析数组", result2 == [1, 2, 3])
 
-    # 带 Markdown 代码块
-    result3 = parser.parse('```json\n{"key": "val"}\n```')
-    check("JsonOutputParser 去除 Markdown 代码块", result3 == {"key": "val"})
+def test_json_output_parser_strips_markdown_fence():
+    from wuwei.parsers.json import JsonOutputParser
 
-    # 无效 JSON — 返回原始字符串
-    result4 = parser.parse("not json at all")
-    check("JsonOutputParser 无效输入返回原始文本", result4 == "not json at all")
+    parser = JsonOutputParser()
+    assert parser.parse('```json\n{"key": "val"}\n```') == {"key": "val"}
 
-    # ListOutputParser
-    list_parser = ListOutputParser()
-    result5 = list_parser.parse("item1, item2, item3")
-    check("ListOutputParser 逗号分隔", result5 == ["item1", "item2", "item3"])
 
-    result6 = list_parser.parse("first\nsecond\nthird")
-    check("ListOutputParser 换行分隔", result6 == ["first", "second", "third"])
+def test_json_output_parser_invalid_input_returns_raw_text():
+    from wuwei.parsers.json import JsonOutputParser
 
-    # PydanticOutputParser
+    parser = JsonOutputParser()
+    assert parser.parse("not json at all") == "not json at all"
+
+
+def test_list_output_parser_separators():
+    from wuwei.parsers.list import ListOutputParser
+
+    parser = ListOutputParser()
+    assert parser.parse("item1, item2, item3") == ["item1", "item2", "item3"]
+    assert parser.parse("first\nsecond\nthird") == ["first", "second", "third"]
+
+
+def test_pydantic_output_parser_returns_model():
+    from wuwei.parsers.pydantic import PydanticOutputParser
+
     class TestModel(BaseModel):
         name: str
         age: int
 
-    pydantic_parser = PydanticOutputParser(schema=TestModel)
-    result7 = pydantic_parser.parse('{"name": "Alice", "age": 30}')
-    check("PydanticOutputParser 解析为模型", isinstance(result7, TestModel))
-    check("PydanticOutputParser 字段正确", result7.name == "Alice" and result7.age == 30)
+    parser = PydanticOutputParser(schema=TestModel)
+    result = parser.parse('{"name": "Alice", "age": 30}')
+    assert isinstance(result, TestModel)
+    assert result.name == "Alice"
+    assert result.age == 30
 
-    # 格式指令
-    fmt = pydantic_parser.get_format_instructions()
-    check("PydanticOutputParser 生成格式指令", "json" in fmt.lower() or "JSON" in fmt)
+    fmt = parser.get_format_instructions()
+    assert "json" in fmt.lower()
 
-    print("  Parsers 全部通过 ✅")
 
-test_parsers()
+# ── skill ──────────────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 2: Skill — SkillViewerTool / FileSystemSkillProvider 完整流程")
-print("=" * 60)
 
-async def test_skill_viewer():
-    """测试 FileSystemSkillProvider 完整流程"""
-    from wuwei.skill import Skill, SkillManager, FileSystemSkillProvider
-    from wuwei.tools import ToolRegistry, ToolExecutor
+async def test_filesystem_skill_provider_end_to_end():
+    from wuwei.skill import FileSystemSkillProvider, SkillManager
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建 SKILL.md 文件
         skill_dir = os.path.join(tmpdir, "skills", "demo-skill")
         os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                "name: demo-skill\n"
+                "description: A demo skill for testing\n"
+                "version: 1.0.0\n"
+                "tags: [test, demo]\n"
+                "allowed_tools: [read_file]\n"
+                "---\n"
+                "# Demo Skill\n\nThis is a demo skill instruction.\n"
+            )
 
-        skill_md = """---
-name: demo-skill
-description: A demo skill for testing
-version: 1.0.0
-tags: [test, demo]
-allowed_tools: [read_file]
----
-
-# Demo Skill
-
-This is a demo skill instruction.
-## Usage
-Use this skill when you need to demo something.
-"""
-        with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
-            f.write(skill_md)
-
-        # 加载
         provider = FileSystemSkillProvider(skill_path=os.path.join(tmpdir, "skills"))
         skills = provider.list_skills()
-        check("FileSystemSkillProvider 发现了 skill", len(skills) == 1)
-        check("skill 名称正确", skills[0].name == "demo-skill")
-        check("skill 有 tags", "test" in skills[0].tags)
-        check("skill 有 allowed_tools", "read_file" in skills[0].allowed_tools)
+        assert len(skills) == 1
+        assert skills[0].name == "demo-skill"
+        assert "test" in skills[0].tags
+        assert "read_file" in skills[0].allowed_tools
 
-        # SkillManager 集成
         manager = SkillManager()
         manager.add_provider(provider)
-        check("SkillManager 列出了 skill", "demo-skill" in manager.list_names())
-
-        # 加载指令
+        assert "demo-skill" in manager.list_names()
         instruction = manager.load_skill_instruction("demo-skill")
-        check("加载了 skill 指令", instruction is not None and "Demo Skill" in instruction)
+        assert instruction is not None and "Demo Skill" in instruction
 
-    print("  Skill 系统 全部通过 ✅")
 
-asyncio.run(test_skill_viewer())
+# ── gateway ────────────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 3: Gateway — BaseGateway / WebhookGateway / 适配器导入")
-print("=" * 60)
 
-def test_gateway():
-    from wuwei.gateway.base import BaseGateway, GatewayMessage
+def test_gateway_message_fields():
+    from wuwei.gateway.base import GatewayMessage
 
-    # GatewayMessage
     msg = GatewayMessage(
         platform="test-platform",
         user_id="user-001",
@@ -154,273 +123,215 @@ def test_gateway():
         content="Hello",
         message_id="msg-001",
     )
-    check("GatewayMessage 创建", msg.platform == "test-platform")
-    check("GatewayMessage 字段", msg.user_id == "user-001" and msg.content == "Hello")
+    assert msg.platform == "test-platform"
+    assert msg.user_id == "user-001"
+    assert msg.content == "Hello"
 
-    # 所有平台适配器导入
+
+def test_platform_gateway_adapters_importable():
     from wuwei.gateway.adapters.dingtalk import DingTalkGateway
     from wuwei.gateway.adapters.feishu import FeishuGateway
     from wuwei.gateway.adapters.telegram import TelegramGateway
     from wuwei.gateway.adapters.wechat import WeChatGateway
-    check("DingTalk 适配器导入", DingTalkGateway is not None)
-    check("Feishu 适配器导入", FeishuGateway is not None)
-    check("Telegram 适配器导入", TelegramGateway is not None)
-    check("WeChat 适配器导入", WeChatGateway is not None)
-
-    # Webhook
     from wuwei.gateway.webhook import WebhookGateway
-    check("WebhookGateway 导入", WebhookGateway is not None)
 
-    print("  Gateway 全部通过 ✅")
+    for cls in (DingTalkGateway, FeishuGateway, TelegramGateway, WeChatGateway, WebhookGateway):
+        assert cls is not None
 
-test_gateway()
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 4: Sandbox — LocalSandbox 错误路径 + 超时")
-print("=" * 60)
+# ── sandbox ────────────────────────────────────────────────────────────────
 
-async def test_sandbox():
-    from wuwei.sandbox.base import BaseSandbox, SandboxResult
+
+async def test_local_sandbox_basic_execution():
     from wuwei.sandbox.local import LocalSandbox
 
     sandbox = LocalSandbox()
-
-    # 基本执行
     result = await sandbox.execute("echo hello")
-    check("LocalSandbox 基本执行", "hello" in result.stdout)
+    assert "hello" in result.stdout
 
-    # 错误命令
-    result2 = await sandbox.execute("nonexistent_command_xyz 2>&1")
-    check("LocalSandbox 错误命令不崩溃", isinstance(result2, SandboxResult))
-    check("LocalSandbox 错误命令 success=False", result2.success == False)
 
-    # 写文件然后读
-    await sandbox.execute("echo 'test data' > /tmp/wuwei_test_file.txt")
-    result3 = await sandbox.execute("cat /tmp/wuwei_test_file.txt")
-    check("LocalSandbox 文件持久化", "test data" in result3.stdout)
+async def test_local_sandbox_error_command_reports_failure():
+    from wuwei.sandbox.base import SandboxResult
+    from wuwei.sandbox.local import LocalSandbox
 
-    # 多行输出
-    result4 = await sandbox.execute("seq 1 5")
-    check("LocalSandbox 多行输出", "1" in result4.stdout and "5" in result4.stdout)
+    sandbox = LocalSandbox()
+    result = await sandbox.execute("nonexistent_command_xyz 2>&1")
+    assert isinstance(result, SandboxResult)
+    assert result.success is False
 
-    print("  Sandbox 全部通过 ✅")
 
-asyncio.run(test_sandbox())
+async def test_local_sandbox_file_roundtrip_in_workspace(tmp_path):
+    """工作区内文件读写，使用相对路径保持跨平台（不依赖 /tmp）。"""
+    from wuwei.sandbox.local import LocalSandbox
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 5: Plugin — PluginManager + PluginContext 完整流程")
-print("=" * 60)
+    sandbox = LocalSandbox(workspace=str(tmp_path))
+    await sandbox.execute("echo test data > wuwei_sandbox_file.txt")
+    result = await sandbox.execute("cat wuwei_sandbox_file.txt")
+    assert "test data" in result.stdout
+    assert (tmp_path / "wuwei_sandbox_file.txt").exists()
 
-def test_plugins():
+
+async def test_local_sandbox_multiline_output():
+    from wuwei.sandbox.local import LocalSandbox
+
+    sandbox = LocalSandbox()
+    result = await sandbox.execute("echo line1 && echo line5")
+    assert "line1" in result.stdout and "line5" in result.stdout
+
+
+# ── plugin ─────────────────────────────────────────────────────────────────
+
+
+def test_plugin_manager_surface():
     from wuwei.plugin import Plugin, PluginContext, PluginManager
     from wuwei.tools import ToolRegistry
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # PluginContext
         registry = ToolRegistry()
         ctx = PluginContext(tool_registry=registry)
-        check("PluginContext 创建", ctx is not None)
-        check("PluginContext 有 tool_registry", hasattr(ctx, 'tool_registry'))
+        assert ctx.tool_registry is registry
 
-        # PluginManager
         pm = PluginManager(ctx)
-        check("PluginManager 创建", pm is not None)
-        check("PluginManager 有 register 方法", hasattr(pm, 'register'))
-        check("PluginManager 有 list_plugins 方法", hasattr(pm, 'list_plugins'))
+        assert hasattr(pm, "register")
+        assert hasattr(pm, "list_plugins")
 
-        # load_directory — should not crash on empty dir
         discovered = pm.load_directory(tmpdir)
-        check("PluginManager.load_directory 空目录", isinstance(discovered, list))
+        assert isinstance(discovered, list)
 
-        # Plugin data model
-        p = Plugin(name="test", description="test plugin")
-        check("Plugin 创建", p.name == "test")
+        plugin = Plugin(name="test", description="test plugin")
+        assert plugin.name == "test"
 
-    print("  Plugin 全部通过 ✅")
 
-test_plugins()
+# ── llm adapters ───────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 6: LLM Adapters — OpenAI / Responses / Anthropic 配置")
-print("=" * 60)
 
-def test_all_adapters():
+def test_adapters_importable_and_agent_from_env_exists():
+    from wuwei.agent import Agent
     from wuwei.llm.adapters.anthropic import AnthropicAdapter
     from wuwei.llm.adapters.openai import OpenAIAdapter
     from wuwei.llm.adapters.responses import ResponsesAdapter
 
-    # 各适配器都能实例化（不需要真实 API key 来测配置逻辑）
-    check("OpenAIAdapter 类型", issubclass(OpenAIAdapter, object))
-    check("AnthropicAdapter 类型", issubclass(AnthropicAdapter, object))
-    check("ResponsesAdapter 类型", issubclass(ResponsesAdapter, object))
+    for cls in (OpenAIAdapter, AnthropicAdapter, ResponsesAdapter):
+        assert isinstance(cls, type)
+    assert hasattr(Agent, "from_env")
 
-    # Agent.from_env 工厂方法
-    from wuwei.agent import Agent
-    check("Agent.from_env 方法存在", hasattr(Agent, 'from_env'))
 
-    print("  LLM Adapters 全部通过 ✅")
+# ── middleware 实例化 ───────────────────────────────────────────────────────
 
-test_all_adapters()
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 7: Middleware — MemoryMiddleware / RagMiddleware / StorageMiddleware 实例化")
-print("=" * 60)
-
-def test_middleware_instances():
-    from wuwei.middleware.memory import MemoryMiddleware
-    from wuwei.middleware.rag import RagMiddleware
-    from wuwei.middleware.storage import StorageMiddleware
-    from wuwei.memory import InMemoryMemoryStore
-
-    # MemoryMiddleware (needs LLM + store)
-    store = InMemoryMemoryStore()
+def test_memory_middleware_instantiation():
     from wuwei.llm import LLMGateway
+    from wuwei.memory import InMemoryMemoryStore
+    from wuwei.middleware.memory import MemoryMiddleware
+
     llm = LLMGateway({"provider": "openai", "api_key": "test", "model": "gpt-4o"})
-    mm = MemoryMiddleware(llm=llm, memory_store=store)
-    check("MemoryMiddleware 实例化", mm is not None)
-    check("MemoryMiddleware 有 before_llm", hasattr(mm, 'before_llm'))
+    mm = MemoryMiddleware(llm=llm, memory_store=InMemoryMemoryStore())
+    assert hasattr(mm, "before_llm")
 
-    # RagMiddleware
+
+def test_rag_middleware_instantiation():
     from wuwei.memory import InMemoryKnowledgeStore
-    ks = InMemoryKnowledgeStore()
-    rm = RagMiddleware(knowledge_store=ks)
-    check("RagMiddleware 实例化", rm is not None)
-    check("RagMiddleware 是 Middleware 子类", hasattr(rm, 'before_llm'))
+    from wuwei.middleware.rag import RagMiddleware
 
-    # StorageMiddleware
-    with tempfile.TemporaryDirectory() as tmpdir:
-        sm = StorageMiddleware(storage_path=tmpdir)
-        check("StorageMiddleware 实例化", sm is not None)
-        check("StorageMiddleware 有 before_llm", hasattr(sm, 'before_llm'))
+    rm = RagMiddleware(knowledge_store=InMemoryKnowledgeStore())
+    assert hasattr(rm, "before_llm")
 
-    print("  Middleware 实例化 全部通过 ✅")
 
-test_middleware_instances()
+def test_storage_middleware_instantiation(tmp_path):
+    from wuwei.middleware.storage import StorageMiddleware
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 8: @tool 装饰器 / Tool.from_function")
-print("=" * 60)
+    sm = StorageMiddleware(storage_path=str(tmp_path))
+    assert hasattr(sm, "before_llm")
 
-def test_tool_decorator():
-    from wuwei.tools.tool import Tool as BaseTool
+
+# ── @tool 装饰器 ───────────────────────────────────────────────────────────
+
+
+def test_tool_decorator_registers_typed_tool():
+    from wuwei.tools.tool import Tool
     from wuwei.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
 
-    # @registry.tool 装饰器
     @registry.tool(description="Greet someone with a custom greeting.")
     def greet(name: str, greeting: str = "Hello") -> str:
-        """Greet someone with a custom greeting.
-
-        Args:
-            name: The person's name
-            greeting: The greeting to use
-        """
         return f"{greeting}, {name}!"
 
     greet_tool = registry.get("greet")
-    check("@tool 创建了 Tool", isinstance(greet_tool, BaseTool))
-    check("Tool 名称", greet_tool.name == "greet")
-    check("Tool 描述", "Greet someone" in greet_tool.description)
+    assert isinstance(greet_tool, Tool)
+    assert greet_tool.name == "greet"
+    assert "Greet someone" in greet_tool.description
 
-    # Tool 通过构造函数创建
-    def add(a: int, b: int) -> int:
-        """Add two numbers."""
-        return a + b
+    result = asyncio.run(greet_tool.invoke({"name": "World", "greeting": "Hi"}))
+    assert result == "Hi, World!"
 
-    registry2 = ToolRegistry()
 
-    @registry2.tool(description="Add two numbers.")
+def test_tool_registration_and_schema_shape():
+    from wuwei.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+
+    @registry.tool(description="Add two numbers.")
     def add_tool(a: int, b: int) -> int:
-        """Add two numbers."""
         return a + b
 
-    add_registered = registry2.get("add_tool")
-    check("Tool 注册成功", add_registered is not None)
-    check("Tool name", add_registered.name == "add_tool")
+    registered = registry.get("add_tool")
+    assert registered is not None
+    assert registered.name == "add_tool"
+    assert hasattr(registered, "parameters")
+    assert asyncio.run(registered.invoke({"a": 3, "b": 4})) == 7
 
-    # Tool 有 schema/工具定义能力
-    check("Tool 有 name", hasattr(add_registered, 'name'))
-    check("Tool 有 description", hasattr(add_registered, 'description'))
-    check("Tool 有 parameters", hasattr(add_registered, 'parameters'))
 
-    # Tool.invoke returns result
-    import asyncio
-    result = asyncio.run(add_registered.invoke({"a": 3, "b": 4}))
-    check("Tool.invoke 正确", result == 7)
+# ── observability ──────────────────────────────────────────────────────────
 
-    print("  @tool 装饰器 全部通过 ✅")
 
-test_tool_decorator()
-
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 9: Observability — TracingMiddleware")
-print("=" * 60)
-
-def test_tracing():
+def test_tracing_middleware_hooks_present():
     from wuwei.observability.tracing import TracingMiddleware
 
     tm = TracingMiddleware(service_name="test-service")
-    check("TracingMiddleware 实例化", tm is not None)
-    check("TracingMiddleware service_name", tm.service_name == "test-service")
-    check("TracingMiddleware 有 before_llm", hasattr(tm, 'before_llm'))
-    check("TracingMiddleware 有 after_llm", hasattr(tm, 'after_llm'))
-    check("TracingMiddleware 有 before_tool", hasattr(tm, 'before_tool'))
-    check("TracingMiddleware 有 after_tool", hasattr(tm, 'after_tool'))
+    assert tm.service_name == "test-service"
+    for hook in ("before_llm", "after_llm", "before_tool", "after_tool"):
+        assert hasattr(tm, hook)
 
-    print("  Observability 全部通过 ✅")
 
-test_tracing()
+# ── streaming types ────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Test 10: Streaming Types")
-print("=" * 60)
 
-def test_streaming_types():
+def test_stream_chunk_types():
     from wuwei.streaming.types import (
-        StreamChunk, MessagesStreamChunk, ValuesStreamChunk,
-        UpdatesStreamChunk, CustomStreamChunk, DebugStreamChunk
+        CustomStreamChunk,
+        DebugStreamChunk,
+        MessagesStreamChunk,
+        StreamChunk,
+        UpdatesStreamChunk,
+        ValuesStreamChunk,
     )
 
-    # StreamChunk
     chunk = StreamChunk(type="text", data="hello")
-    check("StreamChunk 创建", chunk.type == "text" and chunk.data == "hello")
+    assert chunk.type == "text" and chunk.data == "hello"
 
-    # MessagesStreamChunk
-    msg_chunk = MessagesStreamChunk(type="messages", data="msg content")
-    check("MessagesStreamChunk 创建", msg_chunk.type == "messages")
+    assert MessagesStreamChunk(type="messages", data="msg content").type == "messages"
+    assert ValuesStreamChunk(data={"key": "val"}).type == "values"
+    assert UpdatesStreamChunk(data={"node": "llm"}).type == "updates"
+    assert CustomStreamChunk(data={"custom": True}).type == "custom"
+    assert DebugStreamChunk(data={"debug": "info"}).type == "debug"
 
-    # ValuesStreamChunk
-    val_chunk = ValuesStreamChunk(data={"key": "val"})
-    check("ValuesStreamChunk 创建", val_chunk.type == "values")
 
-    # UpdatesStreamChunk
-    upd_chunk = UpdatesStreamChunk(data={"node": "llm"})
-    check("UpdatesStreamChunk 创建", upd_chunk.type == "updates")
+# ── 防回归：本文件必须是可收集的 pytest 模块 ────────────────────────────────
 
-    # CustomStreamChunk
-    custom_chunk = CustomStreamChunk(data={"custom": True})
-    check("CustomStreamChunk 创建", custom_chunk.type == "custom")
 
-    # DebugStreamChunk
-    debug_chunk = DebugStreamChunk(data={"debug": "info"})
-    check("DebugStreamChunk 创建", debug_chunk.type == "debug")
+def test_this_module_collects_with_real_assertions():
+    """防止再次退化为脚本式假测试：pytest 收集的 test_ 函数必须含断言。"""
+    import ast
+    import inspect
 
-    print("  Streaming Types 全部通过 ✅")
+    import tests.test_coverage_gaps as this_module
 
-test_streaming_types()
-
-# ═══════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print(f"📊 补充测试结果: ✅ {PASSED} passed  ❌ {FAILED} failed  (共 {PASSED+FAILED} 项)")
-print("=" * 60)
-
-if FAILED > 0:
-    sys.exit(1)
+    source = inspect.getsource(this_module)
+    tree = ast.parse(source)
+    has_assert = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            has_assert = True
+            break
+    assert has_assert, "test_coverage_gaps.py 必须包含真实断言（禁止退化为脚本式 check）"

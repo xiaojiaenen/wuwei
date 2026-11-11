@@ -24,7 +24,6 @@ import logging
 import time
 from collections import defaultdict, deque
 
-from wuwei.agent import Agent
 from wuwei.llm import LLMGateway
 from wuwei.planning.task import PlanRunResult, Task, TaskList
 from wuwei.tools import ToolRegistry
@@ -59,6 +58,7 @@ class PlanExecutor:
         retries: int = 1,
         middleware=None,
         checkpointer=None,
+        event_bus=None,
     ):
         self.llm = llm
         self.tools = tools
@@ -72,6 +72,7 @@ class PlanExecutor:
         self.retries = retries
         self.middleware = middleware
         self.checkpointer = checkpointer
+        self.event_bus = event_bus
         self._tasks_usage: list[tuple[dict[str, int], int]] = []
 
     # ── 公共 API ─────────────────────────────────────────────────────
@@ -246,14 +247,17 @@ class PlanExecutor:
         self, task: Task, context: str, *, resume=None, approved=True, reason=""
     ) -> tuple[str | None, str | None]:
         """用独立会话的子 agent 执行单个任务，返回 (result, error)。"""
-        worker = Agent(
-            llm=self.llm,
+        from wuwei.agent.child import build_child_agent
+
+        worker = build_child_agent(
+            self.llm,
             tools=self.tools or ToolRegistry(),
-            load_builtins=False,
-            default_system_prompt=self.task_system_prompt,
-            default_max_steps=self.max_steps_per_task,
-            middleware=self._inherited_middleware(),
+            system_prompt=self.task_system_prompt,
+            max_steps=self.max_steps_per_task,
+            parent_middleware=self._parent_middleware(),
+            child_middleware=self.middleware,
             checkpointer=self.checkpointer,
+            event_bus=self.event_bus,
         )
         session = worker.create_session()
         prompt = f"任务 #{task.id}: {task.description}"
@@ -285,14 +289,11 @@ class PlanExecutor:
             task.status = "unknown" if any(m.role == "tool" for m in messages) else "failed"
             return None, f"{type(exc).__name__}: {exc}"
 
-    def _inherited_middleware(self):
-        from wuwei.agent.sub_agent import inherit_middleware
+    def _parent_middleware(self):
         from wuwei.runtime.context import current_context
 
         parent = current_context.get()
-        return inherit_middleware(
-            parent.config.get("middleware") if parent else None, self.middleware
-        )
+        return parent.config.get("middleware") if parent else None
 
     @staticmethod
     def _block_downstream(

@@ -58,7 +58,22 @@ class SubAgent:
     inherit_deps: bool = False
 
     def to_tool_schema(self) -> dict:
-        """生成 task 工具的 OpenAI function schema"""
+        """生成 task 工具的 OpenAI function schema。
+
+        声明了 ``input_model`` 时，``task`` 实际要求是该模型的 JSON 序列化串
+        （``model_validate_json``）。此前 schema 仍对外广播"自然语言 task"，
+        模型按假契约调用会直接校验失败——这里把模型的 JSON Schema 写进参数
+        描述，让契约与执行一致。
+        """
+        task_property = {
+            "type": "string",
+            "description": f"Task description for {self.name}",
+        }
+        if self.input_model is not None:
+            task_property["description"] = (
+                f"Task input for {self.name}: a JSON object serialized to a string, "
+                f'matching schema: {json.dumps(self.input_model.model_json_schema(), ensure_ascii=False)}'
+            )
         return {
             "type": "function",
             "function": {
@@ -68,12 +83,7 @@ class SubAgent:
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": f"Task description for {self.name}",
-                        },
-                    },
+                    "properties": {"task": task_property},
                     "required": ["task"],
                 },
             },
@@ -107,15 +117,6 @@ class SubAgentMiddleware(Middleware):
         self.parent_llm = parent_llm
         for sa in sub_agents:
             self.sub_agents[sa.name] = sa
-
-    async def before_llm(self, ctx: MiddlewareContext) -> MiddlewareContext:
-        """注入子代理工具到可用工具列表
-
-        将子代理工具 schema 写入 ctx.metadata，
-        上层调用者 (AgentRunner.agent_node) 应读取并合并到 tools 列表。
-        """
-        ctx.metadata["_sub_agent_tools"] = self.get_task_tools()
-        return ctx
 
     async def wrap_model_call(
         self,
@@ -198,6 +199,8 @@ class SubAgentMiddleware(Middleware):
         tool_name: str,
         arguments: dict,
         ctx: MiddlewareContext | None = None,
+        *,
+        tool_call_id: str | None = None,
     ) -> ToolMessage:
         """处理 task 工具调用
 
@@ -232,7 +235,11 @@ class SubAgentMiddleware(Middleware):
 
         from wuwei.tools.outcome import ToolOutcome
 
-        return ToolOutcome.from_delegation(json.loads(result)).to_message(tool_name, tool_name)
+        # call_id 必须是对应 ToolCall 的 id，不能拿工具名充数（协议上
+        # assistant.tool_calls 与 ToolMessage 靠它配对）。
+        return ToolOutcome.from_delegation(json.loads(result)).to_message(
+            tool_call_id or tool_name, tool_name
+        )
 
     async def _run_sub_agent(
         self,
@@ -243,7 +250,6 @@ class SubAgentMiddleware(Middleware):
         resume: dict | None = None,
     ) -> str:
         """Use the same governed engine as ordinary agent runs."""
-        from wuwei.agent.agent import Agent
         from wuwei.runtime.context import current_context
 
         from wuwei.runtime.handoff import DelegationInput
@@ -291,15 +297,16 @@ class SubAgentMiddleware(Middleware):
                 )
             task = HumanMessage(task, content_parts=parts)
         config = parent.config if parent is not None else {}
-        worker = Agent(
-            llm=llm,
-            tools=sub_agent.tools or [],
-            load_builtins=False,
-            default_system_prompt=sub_agent.system_prompt,
-            default_max_steps=sub_agent.max_steps,
-            middleware=inherit_middleware(
-                config.get("middleware"), sub_agent.middleware, exclude=self
-            ),
+        from wuwei.agent.child import build_child_agent
+
+        worker = build_child_agent(
+            llm,
+            tools=sub_agent.tools,
+            system_prompt=sub_agent.system_prompt,
+            max_steps=sub_agent.max_steps,
+            parent_middleware=config.get("middleware"),
+            child_middleware=sub_agent.middleware,
+            exclude_middleware=self,
             checkpointer=config.get("checkpointer"),
             event_bus=config.get("event_bus"),
             deps=(
@@ -369,17 +376,5 @@ class SubAgentMiddleware(Middleware):
         return DelegationOutput.model_validate(payload).model_dump_json()
 
 
-def inherit_middleware(parent=None, explicit=None, *, exclude=None):
-    """Preserve parent guards and add child constraints without rebinding them.
-
-    A fresh stack owns hook ordering; middleware instances retain their configured
-    policies. The active dispatcher is omitted to prevent unbounded self-delegation.
-    """
-    from wuwei.middleware.stack import MiddlewareStack
-
-    stack = MiddlewareStack()
-    for source in (parent, explicit):
-        for middleware in getattr(source, "middlewares", source or []):
-            if middleware is not exclude and middleware not in stack.middlewares:
-                stack.add(middleware)
-    return stack
+# 唯一实现在 wuwei.agent.child；此处保留导入兼容既有 from sub_agent import 用法。
+from wuwei.agent.child import inherit_middleware as inherit_middleware  # noqa: E402

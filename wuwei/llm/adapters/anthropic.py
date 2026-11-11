@@ -57,6 +57,7 @@ class AnthropicAdapter(BaseAdapter):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.enable_prompt_caching = enable_prompt_caching
+        self._supports_temperature: bool | None = None  # SDK 能力探测只做一次
 
     def build_request(
         self,
@@ -179,10 +180,12 @@ class AnthropicAdapter(BaseAdapter):
     async def call(self, request: dict) -> Any:
         """调用 Anthropic API（stream=True 时返回 AsyncStream）"""
         # SDK versions differ: newer Messages APIs removed sampling controls.
-        parameters = inspect.signature(self.client.messages.create).parameters
-        if "temperature" not in parameters and not any(
-            p.kind == p.VAR_KEYWORD for p in parameters.values()
-        ):
+        if self._supports_temperature is None:
+            parameters = inspect.signature(self.client.messages.create).parameters
+            self._supports_temperature = "temperature" in parameters or any(
+                p.kind == p.VAR_KEYWORD for p in parameters.values()
+            )
+        if not self._supports_temperature:
             if request.get("temperature") is not None:
                 raise ValueError("Installed Anthropic SDK does not support temperature")
             request = {k: v for k, v in request.items() if k != "temperature"}

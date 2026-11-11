@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from wuwei.agent.agent import Agent
 from wuwei.core.message import AIMessage, HumanMessage, SystemMessage
@@ -49,7 +49,7 @@ class DelegationStoppedError(RuntimeError):
 
 
 async def _governed_run(agent, task, *, system_prompt=None, middleware=None):
-    from wuwei.agent.sub_agent import inherit_middleware
+    from wuwei.agent.child import inherit_middleware, build_child_agent
     from wuwei.runtime.context import current_context
 
     parent = current_context.get()
@@ -58,16 +58,13 @@ async def _governed_run(agent, task, *, system_prompt=None, middleware=None):
         raise RuntimeError("Maximum delegation depth exceeded")
     token = _delegate_depth.set(depth + 1)
     try:
-        worker = Agent(
-            llm=agent.llm,
+        worker = build_child_agent(
+            agent.llm,
             tools=agent.tool_registry,
-            load_builtins=False,
-            default_system_prompt=system_prompt or agent.default_system_prompt,
-            default_max_steps=agent.default_max_steps,
-            middleware=inherit_middleware(
-                parent.config.get("middleware") if parent else None,
-                inherit_middleware(middleware, agent.middleware),
-            ),
+            system_prompt=system_prompt or agent.default_system_prompt,
+            max_steps=agent.default_max_steps,
+            parent_middleware=parent.config.get("middleware") if parent else None,
+            child_middleware=inherit_middleware(middleware, agent.middleware),
             checkpointer=agent.checkpointer,
             event_bus=agent.event_bus,
         )
@@ -87,22 +84,6 @@ class TeamMember:
     agent: Agent
     role: str
     description: str = ""
-    tools: list[str] = field(default_factory=list)
-
-
-@dataclass
-class HandoffSignal:
-    """Agent 间交接信号
-
-    借鉴 LangGraph 的 Command(goto=...) 模式。
-    一个 Agent 完成任务后，可以将控制权交接给另一个 Agent。
-    """
-
-    source: str
-    target: str
-    context: str  # 交接时的上下文/结果摘要
-    task: str  # 新 Agent 要执行的任务
-    metadata: dict = field(default_factory=dict)
 
 
 class MultiAgentGraph:
@@ -113,7 +94,9 @@ class MultiAgentGraph:
     - 支持并行扇出（fan-out）
     - 支持 Agent 间 Handoff
     - 所有通信通过 State.messages 结构化传递
-    - 支持检查点（可恢复）
+
+    注意：图编排本身没有恢复入口；成员代理各自的会话经共享 checkpointer
+    可单独恢复（见 docs/planning/overview.md），整图中断需应用层自行处理。
 
     示例：
         graph = MultiAgentGraph()
@@ -148,7 +131,6 @@ class MultiAgentGraph:
             agent=agent,
             role=role,
             description=description,
-            tools=tools or [],
         )
         return self
 
@@ -459,6 +441,3 @@ class HandoffMiddleware(Middleware):
 
         return ctx
 
-
-# 保持向后兼容
-Swarm = MultiAgentGraph  # Swarm 现在是 MultiAgentGraph 的别名

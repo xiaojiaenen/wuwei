@@ -70,6 +70,8 @@ class ToolExecutor:
         self.max_output_chars = max_output_chars
         self._semaphore: asyncio.Semaphore | None = None
         self._semaphore_loop = None
+        # call_id -> 未截断原文；仅在发生截断时写入，runner 在提交工具结果时领取。
+        self._full_outputs: dict[str, str] = {}
 
     def _concurrency_slot(self) -> asyncio.Semaphore:
         # Bind lazily so a shared executor stays usable across event loops (tests,
@@ -230,16 +232,32 @@ class ToolExecutor:
         from wuwei.tools.outcome import ToolOutcome
 
         if isinstance(output, ToolOutcome):
-            return output.to_message(
+            raw = output.content
+            message = output.to_message(
                 tool_call.id, tool_call.function.name, limit=self.max_output_chars
             )
-        return Message(
-            role="tool",
-            tool_call_id=tool_call.id,
-            content=self.serialize_output(output),
-            name=tool_call.function.name,
-            metadata={"tool_outcome": {"status": "success", "executed": True}},
-        )
+        else:
+            raw = output
+            message = Message(
+                role="tool",
+                tool_call_id=tool_call.id,
+                content=self.serialize_output(output),
+                name=tool_call.function.name,
+                metadata={"tool_outcome": {"status": "success", "executed": True}},
+            )
+        # 归档型中间件（Ledger）需要未被截断的原文；截断发生在 serialize 之内，
+        # 这里把原文暂存在执行器的内存侧信道（不进 message metadata，因此永不
+        # 落入检查点/batch_results），由 runner 在 after_tool 钩子前后取用并清空。
+        full = serialize_tool_output(raw, limit=None)
+        if full != message.content:
+            self._full_outputs[tool_call.id] = full
+            if len(self._full_outputs) > 128:  # 防御：未领取的残留不无限累积
+                self._full_outputs.pop(next(iter(self._full_outputs)))
+        return message
+
+    def drain_full_output(self, call_id: str) -> str | None:
+        """取走一次调用未截断的原文（仅截断发生时才有值）。"""
+        return self._full_outputs.pop(call_id, None)
 
     def _timeout_message(self, tool: Tool, tool_call: ToolCall, attempts: int) -> Message:
         policy = tool.execution

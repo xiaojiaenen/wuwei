@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -7,6 +8,59 @@ import pytest
 
 from wuwei.evals import EvalCase, EvalRunner
 from wuwei.sandbox.local import LocalPythonDriver
+
+
+def _quote_command(parts: list[str]) -> str:
+    """跨平台把参数列表拼成 shell 命令（POSIX 单引号 / Windows cmd 引号规则）。"""
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    import shlex
+
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _pid_alive(pid: int) -> bool:
+    """探测进程是否存活。
+
+    Windows 上 ``os.kill(pid, 0)`` 语义不同（sig=0 不是探测），用 OpenProcess；
+    POSIX 沿用 kill(pid, 0)。
+    """
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    import ctypes
+    import ctypes.wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        # 终止后的进程对象在句柄释放前 OpenProcess 仍会成功，必须查退出码。
+        exit_code = ctypes.wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _docker_available() -> bool:
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 class Agent:
@@ -56,12 +110,7 @@ async def test_cancel_local_process_is_reaped(tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return
-    os.kill(pid, 9)
-    pytest.fail("cancelled subprocess remains alive")
+    assert not _pid_alive(pid), "cancelled subprocess remains alive"
 
 
 @pytest.mark.asyncio
@@ -160,15 +209,19 @@ async def test_tool_request_not_success_and_denial_not_execution():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("driver", ["shell", "docker"])
 async def test_cancel_other_owned_subprocesses(driver, tmp_path):
-    import shlex
-
     from wuwei.sandbox.base import run_shell
     from wuwei.sandbox.docker import DockerDriver
+
+    if driver == "docker" and not _docker_available():
+        pytest.skip("docker daemon unavailable")
 
     path = tmp_path / "pid"
     code = f'import os,time; open({str(path)!r},"w").write(str(os.getpid())); time.sleep(60)'
     if driver == "shell":
-        operation = run_shell(f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}")
+        # Python worker 是 shell 的孙进程：直接 kill shell 不会传播，
+        # 因此取消后整棵树都必须消失。
+        command = _quote_command([sys.executable, "-c", code])
+        operation = run_shell(command)
     else:
         operation = DockerDriver()._run([sys.executable, "-c", code], stdin_data=b"", timeout=60)
     task = asyncio.create_task(operation)
@@ -180,43 +233,30 @@ async def test_cancel_other_owned_subprocesses(driver, tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    if driver == "shell":
-        # The Python worker is a descendant, not our waitpid-owned direct child.
-        # Linux may retain its dead process-table entry until init reaps it.
-        import subprocess
-
-        state = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
-        ).stdout.strip()
-        assert not state or state.startswith("Z"), (
-            f"Cancelled shell descendant is still running: {state}"
-        )
-    else:
-        # This is the directly owned child; communicate() must have reaped it.
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+    assert not _pid_alive(pid), f"cancelled {driver} subprocess remains alive"
 
 
 @pytest.mark.asyncio
 async def test_shell_timeout_kills_descendant(tmp_path):
-    import shlex
-
     from wuwei.sandbox.base import run_shell
 
     path = tmp_path / "pid"
     code = f'import os,time; open({str(path)!r}, "w").write(str(os.getpid())); time.sleep(60)'
-    result = await run_shell(
-        f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} & wait", timeout=0.1
-    )
+    worker = _quote_command([sys.executable, "-c", code])
+    if os.name == "nt":
+        # cmd.exe：`&` 顺序执行，python worker 是 shell 的子进程且存活 60s，
+        # 超时后整棵树必须被终止。
+        command = f"{worker} & ping -n 60 127.0.0.1 >nul"
+    else:
+        command = f"{worker} & wait"
+    result = await run_shell(command, timeout=0.1)
     assert not result.success
+    for _ in range(100):
+        if path.exists():
+            break
+        await asyncio.sleep(0.01)
     pid = int(path.read_text())
-    # A reparented killed process may briefly remain a zombie; it cannot execute.
-    import subprocess
-
-    state = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
-    ).stdout.strip()
-    assert not state or state.startswith("Z")
+    assert not _pid_alive(pid), "timed-out shell descendant is still running"
 
 
 @pytest.mark.asyncio

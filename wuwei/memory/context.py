@@ -60,18 +60,6 @@ class Context:
         """整体替换消息历史（用于从检查点恢复会话）。"""
         self._messages = list(messages)
 
-    def keep_last_turns(self, n: int) -> None:
-        """只保留 system 消息和最近 n 轮对话，旧消息从内存中移除。"""
-        from wuwei.memory.context_window import split_turns
-
-        system_msgs, turns = split_turns(self._messages)
-        if len(turns) <= n:
-            return
-        kept = list(system_msgs)
-        for turn in turns[-n:]:
-            kept.extend(turn)
-        self._messages = kept
-
     def to_dict(self) -> dict:
         """序列化为 dict。"""
         return {"messages": [m.model_dump(mode="json", exclude_none=True) for m in self._messages]}

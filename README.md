@@ -61,7 +61,7 @@ asyncio.run(main())
 | 上下文 | Context、压缩、Ledger、Memory、RAG | 摘要不替代原文；持久账本支持召回与 pin |
 | 存储与检索 | FileStorage、CuratedMemoryStore、vectorstore | 内存后端与 Chroma/Qdrant/pgvector/Milvus 可选后端 |
 | 插件与技能 | PluginManager、SkillManager | setup 注册工具/中间件；文件系统技能与 allowed-tools |
-| 文件与代码 | LocalFS/InMemoryFS、sandbox、Code Mode | Code Mode 是可信进程内 Python，不是沙箱 |
+| 文件与代码 | LocalFS/InMemoryFS、sandbox、Code Mode | Code Mode 是可信进程内 Python，不是沙箱；`sandbox`（Docker/E2B 驱动）为实验性模块，未接入默认工具执行链 |
 | 协议 | MCP、A2A、AG-UI | MCP stdio/HTTP/旧 SSE；A2A 0.3 message/send；AG-UI SSE/NDJSON |
 | 集成 | gateway、DecisionClient | 飞书/钉钉/Telegram/微信/Webhook 适配与决策模型客户端 |
 | 运维与评估 | EventBus、ActionLog、evals、debug | 事件、动作记录、评估 CLI；fork 默认模拟副作用 |

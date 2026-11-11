@@ -6,6 +6,7 @@ is deliberately not automatically recoverable: remote effects need reconciliatio
 
 import asyncio
 import json
+from contextlib import closing
 import os
 import sqlite3
 from abc import ABC, abstractmethod
@@ -17,6 +18,52 @@ from wuwei.graph.state import State
 
 def _generate_checkpoint_id() -> str:
     return f"ckpt_{datetime.now(UTC).isoformat()}_{uuid4().hex[:8]}"
+
+
+def _encode_state_dict(state: State, metadata: dict | None) -> dict:
+    """编码为快照 dict。
+
+    v2（调用方显式传入 metadata 时）：runner 的 metadata 只存于独立列，快照列
+    不再内嵌同一份——此前同一份 metadata 在 state 列与 metadata 列各写一次；
+    runner 的消息另以 ``State.messages`` 与 ``metadata.session.context`` 双份
+    落盘。v2 快照列只保留 messages/step（调用方自带的 state.metadata 非空时
+    照旧保留——那是 StateGraph 直存路径的既有语义，不是重复）。v1（无
+    metadata 参数）：形状不变，向后兼容。
+    """
+    data = state.to_dict()
+    if metadata:
+        if not data.get("metadata"):
+            data.pop("metadata", None)
+        data["schema_version"] = 2
+    return data
+
+
+def _decode_state(snapshot: dict, metadata: dict | None) -> State:
+    """解码快照；v2 时 metadata 取自独立列，并从会话副本重灌 messages。
+
+    重灌保持所有 ``state.messages`` 消费方（resume 恢复上下文、debug.list_steps、
+    fork 重放）零改动；消息对象与保存前的 ``session.context`` 同型。
+    v1 快照内嵌 metadata，形状照旧。
+    """
+    if snapshot.get("schema_version") == 2:
+        state = State(step=snapshot.get("step", 0))
+        snapshot_meta = snapshot.get("metadata") or {}
+        # StateGraph 直存路径的 state.metadata 优先（与 v1 消费行为一致）；
+        # runner 路径快照 metadata 为空，取独立列。
+        state.metadata = snapshot_meta if snapshot_meta else (metadata or {})
+        if snapshot.get("messages"):
+            state.messages = State.from_dict(
+                {"messages": snapshot["messages"]}
+            ).messages
+        else:
+            session = (metadata or {}).get("session") or {}
+            context = session.get("context") or {}
+            if context.get("messages"):
+                from wuwei.memory.context import Context
+
+                state.messages = Context.from_dict(context).get_messages()
+        return state
+    return State.from_dict(snapshot)
 
 
 class BaseCheckpointer(ABC):
@@ -62,7 +109,7 @@ class MemoryCheckpointer(BaseCheckpointer):
         cid = checkpoint_id or _generate_checkpoint_id()
         metadata = metadata or {}
         # JSON roundtrip makes this backend's copy and serializability semantics match SQLite.
-        snapshot = json.loads(json.dumps(state.to_dict(), ensure_ascii=False))
+        snapshot = json.loads(json.dumps(_encode_state_dict(state, metadata), ensure_ascii=False))
         self.checkpoints[cid] = {
             "state": snapshot,
             "metadata": dict(metadata),
@@ -76,7 +123,10 @@ class MemoryCheckpointer(BaseCheckpointer):
     async def load(self, checkpoint_id):
         if checkpoint_id not in self.checkpoints:
             raise ValueError(f"检查点不存在: {checkpoint_id}")
-        return State.from_dict(json.loads(json.dumps(self.checkpoints[checkpoint_id]["state"])))
+        record = self.checkpoints[checkpoint_id]
+        snapshot = json.loads(json.dumps(record["state"]))
+        metadata = json.loads(json.dumps(record["metadata"]))
+        return _decode_state(snapshot, metadata)
 
     async def list_checkpoints(self, limit=10, before=None):
         if limit <= 0:
@@ -102,7 +152,9 @@ class MemoryCheckpointer(BaseCheckpointer):
 
     async def replace_current(self, checkpoint_id, state, *, metadata):
         # Serialize before consuming so invalid payloads leave the old state usable.
-        snapshot = json.loads(json.dumps(state.to_dict(), ensure_ascii=False))
+        snapshot = json.loads(
+            json.dumps(_encode_state_dict(state, metadata), ensure_ascii=False)
+        )
         meta = json.loads(json.dumps(metadata, ensure_ascii=False))
         record = self.checkpoints.get(checkpoint_id)
         if record is None or checkpoint_id in self._claims:
@@ -132,7 +184,7 @@ class SQLiteCheckpointer(BaseCheckpointer):
     def __init__(self, db_path=".wuwei/checkpoints.db"):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db, db:
             db.executescript("""
             CREATE TABLE IF NOT EXISTS checkpoints (
                 id TEXT PRIMARY KEY, state TEXT NOT NULL, metadata TEXT DEFAULT '{}',
@@ -147,11 +199,11 @@ class SQLiteCheckpointer(BaseCheckpointer):
     async def save(self, state, checkpoint_id=None, metadata=None):
         cid = checkpoint_id or _generate_checkpoint_id()
         metadata = metadata or {}
-        snapshot = json.dumps(state.to_dict(), ensure_ascii=False)
+        snapshot = json.dumps(_encode_state_dict(state, metadata), ensure_ascii=False)
         meta_json = json.dumps(metadata, ensure_ascii=False)
 
         def write():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 db.execute(
                     "INSERT OR REPLACE INTO checkpoints (id,state,metadata,parent_checkpoint_id,created_at) VALUES (?,?,?,?,?)",
                     (
@@ -172,13 +224,13 @@ class SQLiteCheckpointer(BaseCheckpointer):
 
     async def load(self, checkpoint_id):
         def read():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 row = db.execute(
-                    "SELECT state FROM checkpoints WHERE id=?", (checkpoint_id,)
+                    "SELECT state,metadata FROM checkpoints WHERE id=?", (checkpoint_id,)
                 ).fetchone()
             if not row:
                 raise ValueError(f"检查点不存在: {checkpoint_id}")
-            return State.from_dict(json.loads(row[0]))
+            return _decode_state(json.loads(row[0]), json.loads(row[1] or "{}"))
 
         return await asyncio.to_thread(read)
 
@@ -187,7 +239,7 @@ class SQLiteCheckpointer(BaseCheckpointer):
             return []
 
         def read():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 if before:
                     cursor = db.execute(
                         "SELECT rowid FROM checkpoints WHERE id=?", (before,)
@@ -217,7 +269,7 @@ class SQLiteCheckpointer(BaseCheckpointer):
 
     async def claim(self, checkpoint_id):
         def consume():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 row = db.execute(
                     "SELECT metadata FROM checkpoints WHERE id=?", (checkpoint_id,)
@@ -239,12 +291,12 @@ class SQLiteCheckpointer(BaseCheckpointer):
         return await asyncio.to_thread(consume)
 
     async def replace_current(self, checkpoint_id, state, *, metadata):
-        snapshot = json.dumps(state.to_dict(), ensure_ascii=False)
+        snapshot = json.dumps(_encode_state_dict(state, metadata), ensure_ascii=False)
         meta_json = json.dumps(metadata, ensure_ascii=False)
         cid = _generate_checkpoint_id()
 
         def replace():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 record = db.execute(
                     "SELECT metadata FROM checkpoints WHERE id=?", (checkpoint_id,)
@@ -279,7 +331,7 @@ class SQLiteCheckpointer(BaseCheckpointer):
         payload = json.dumps(writes, ensure_ascii=False)
 
         def write():
-            with sqlite3.connect(self.db_path) as db:
+            with closing(sqlite3.connect(self.db_path)) as db, db:
                 db.execute(
                     "INSERT INTO checkpoint_writes (checkpoint_id,task_id,writes) VALUES (?,?,?)",
                     (checkpoint_id, task_id, payload),
