@@ -47,6 +47,10 @@
   超时/取消后 descendant 存活；改用 `taskkill /F /T`（POSIX 沿用进程组）。
 - `tests/test_quality_contracts.py`、`test_sandbox.py`、租约测试跨平台化
   （`os.kill(pid,0)` 语义、POSIX 引号、`ps`/`pwd` 依赖、时间余量）。
+- CI windows 矩阵首次运行即捕获 11 个存量平台缺陷并修复：python/skill 工具与
+  `LocalPythonDriver` 子进程加 `-X utf8`（Windows 控制台 cp1252 打印中文直接崩溃）、
+  evals CLI 输出强制 UTF-8 stdio、文档硬化测试按 UTF-8 读取中文文档、
+  docker 集成测试在 Windows runner 跳过（Windows 容器模式无法运行 Linux 镜像）。
 
 ### 委派与治理（P2）
 
